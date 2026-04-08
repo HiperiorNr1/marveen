@@ -1319,6 +1319,10 @@ main {
   background: rgba(217, 119, 87, 0.12);
   color: var(--accent);
 }
+.badge-heartbeat {
+  background: rgba(200, 80, 120, 0.12);
+  color: #c85078;
+}
 
 .task-info {
   flex: 1;

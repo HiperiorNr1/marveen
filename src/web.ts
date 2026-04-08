@@ -562,6 +562,7 @@ interface ScheduledTask {
   agent: string
   enabled: boolean
   createdAt: number
+  type?: 'task' | 'heartbeat'  // heartbeat = silent unless important
 }
 
 function parseSkillMdFrontmatter(content: string): { name?: string; description?: string; body: string } {
@@ -587,7 +588,7 @@ function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = readFileOr(skillPath, '')
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -600,6 +601,7 @@ function readScheduledTask(taskName: string): ScheduledTask | null {
     agent: config.agent || 'marveen',
     enabled: config.enabled !== false,
     createdAt: config.createdAt || 0,
+    type: (config.type as 'task' | 'heartbeat') || 'task',
   }
 }
 
@@ -626,7 +628,7 @@ function sanitizeScheduleName(raw: string): string {
 
 function writeScheduledTask(
   taskName: string,
-  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean }
+  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string }
 ): void {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
   mkdirSync(dir, { recursive: true })
@@ -649,6 +651,7 @@ function writeScheduledTask(
   if (data.schedule !== undefined) config.schedule = data.schedule
   if (data.agent !== undefined) config.agent = data.agent
   if (data.enabled !== undefined) config.enabled = data.enabled
+  if (data.type !== undefined) config.type = data.type
   if (!config.createdAt) config.createdAt = Math.floor(Date.now() / 1000)
   writeFileSync(configPath, JSON.stringify(config, null, 2))
 }
@@ -747,8 +750,9 @@ function startScheduleRunner(): NodeJS.Timeout {
       if (!cronMatchesNow(task.schedule, catchUp)) continue
 
       // Prevent double-firing within the same minute
+      // Prevent double-firing: skip if already ran within the catch-up window
       const lastRun = scheduleLastRun.get(task.name) || 0
-      if (now - lastRun < 55000) continue
+      if (now - lastRun < catchUp) continue
 
       const agentName = task.agent || 'marveen'
 
@@ -774,7 +778,12 @@ function startScheduleRunner(): NodeJS.Timeout {
           .replace(/"/g, '\\"')
           .replace(/\n/g, ' ')
 
-        const prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: ${ALLOWED_CHAT_ID}, reply tool). `
+        let prefix: string
+        if (task.type === 'heartbeat') {
+          prefix = `[Heartbeat: ${task.name}] FONTOS: Ez egy csendes ellenorzes. CSAK AKKOR irj Telegramon (chat_id: ${ALLOWED_CHAT_ID}), ha tenyleg fontos/surgos dolgot talalsz. Ha minden rendben, NE irj semmit -- maradj csendben. `
+        } else {
+          prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: ${ALLOWED_CHAT_ID}, reply tool). `
+        }
         execSync(`${TMUX} send-keys -t ${session} "${prefix}${escapedPrompt}" Enter`, { timeout: 5000 })
         scheduleLastRun.set(task.name, now)
         logger.info({ task: task.name, agent: agentName, session }, 'Scheduled task fired')
@@ -835,6 +844,15 @@ export function startWebServer(port = 3420): http.Server {
           writeFileSync(join(agentDir(name), 'CLAUDE.md'), claudeMd)
           writeFileSync(join(agentDir(name), 'SOUL.md'), soulMd)
           logger.info({ name }, 'Agent created successfully')
+
+          // Notify all running agents about the new team member
+          const allAgents = listAgentNames()
+          const runningAgents = allAgents.filter(a => a !== name && isAgentRunning(a))
+          // Also notify Marveen (main session)
+          const notifyTargets = ['marveen', ...runningAgents]
+          for (const target of notifyTargets) {
+            createAgentMessage('system', target, `Uj csapattag erkezett: ${name}. Leirasa: ${description}. Udv neki ha legkozelebb beszeltek!`)
+          }
         } catch (err) {
           // Cleanup on failure
           rmSync(agentDir(name), { recursive: true, force: true })
@@ -1239,7 +1257,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       if (path === '/api/schedules' && method === 'POST') {
         const body = await readBody(req)
         const data = JSON.parse(body.toString()) as {
-          name: string; description: string; prompt: string; schedule: string; agent?: string
+          name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string
         }
         const name = sanitizeScheduleName(data.name || '')
         if (!name) return json(res, { error: 'Name is required' }, 400)
@@ -1255,6 +1273,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
           schedule: data.schedule.trim(),
           agent: data.agent || 'marveen',
           enabled: true,
+          type: data.type || 'task',
         })
         logger.info({ name, schedule: data.schedule }, 'Scheduled task created')
         return json(res, { ok: true, name })

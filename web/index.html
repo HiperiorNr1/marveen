@@ -644,6 +644,25 @@
             <select id="scheduleAgent"></select>
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-group form-half">
+            <label for="scheduleType">Típus</label>
+            <select id="scheduleType">
+              <option value="task">Feladat (mindig szól)</option>
+              <option value="heartbeat">Heartbeat (csak ha fontos)</option>
+            </select>
+          </div>
+          <div class="form-group form-half" id="heartbeatTemplateGroup" hidden>
+            <label for="heartbeatTemplate">Sablon</label>
+            <select id="heartbeatTemplate">
+              <option value="">Egyéni...</option>
+              <option value="calendar">Naptár figyelő</option>
+              <option value="email">Email figyelő</option>
+              <option value="kanban">Kanban határidő figyelő</option>
+              <option value="full">Teljes ellenőrzés</option>
+            </select>
+          </div>
+        </div>
         <div class="form-group">
           <label for="scheduleDesc">Leírás <span class="hint">(rövid)</span></label>
           <input type="text" id="scheduleDesc" placeholder="Mit csinál ez a feladat">

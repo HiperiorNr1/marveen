@@ -25,6 +25,9 @@ reports/
 # Generated from template (personal config)
 CLAUDE.md
 
+# Custom MCP servers (user-specific)
+mcp-servers/
+
 # Personal/project-specific docs (not part of the product)
 REBUILD_PROMPT*.md
 SKOOL_*.md

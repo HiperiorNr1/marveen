@@ -1321,6 +1321,54 @@ document.getElementById('scheduleModalClose').addEventListener('click', () => cl
 scheduleModalOverlay.addEventListener('click', (e) => { if (e.target === scheduleModalOverlay) closeModal(scheduleModalOverlay) })
 
 // Frequency change handler
+// Type toggle (task vs heartbeat)
+document.getElementById('scheduleType').addEventListener('change', () => {
+  const isHeartbeat = document.getElementById('scheduleType').value === 'heartbeat'
+  document.getElementById('heartbeatTemplateGroup').hidden = !isHeartbeat
+  if (isHeartbeat && !document.getElementById('schedulePrompt').value.trim()) {
+    // Set default heartbeat schedule to every 15 min
+    scheduleFrequency.value = 'custom'
+    document.getElementById('scheduleCustomCron').value = '*/15 * * * *'
+    customScheduleGroup.hidden = false
+    scheduleTimeGroup.hidden = true
+  }
+})
+
+// Heartbeat templates
+const HEARTBEAT_TEMPLATES = {
+  calendar: {
+    desc: 'Naptár figyelő',
+    prompt: 'Ellenorizd a naptaramat (list-events a mai napra). Ha van meeting 1 oran belul, szolj Telegramon es 10 perccel a meeting elott is emlekeztetess. Ha nincs kozelgo esemeny, ne irj semmit.',
+    schedule: '*/15 * * * *',
+  },
+  email: {
+    desc: 'Email figyelő',
+    prompt: 'Ellenorizd az emailjeimet (search_emails newer_than:1h). Ha surgos vagy fontos levelet talalsz (pl. ugyfeltol, fonokotol, fizetessel kapcsolatos), szolj Telegramon. Ha csak promo/newsletter, ne irj semmit.',
+    schedule: '*/30 * * * *',
+  },
+  kanban: {
+    desc: 'Kanban határidő figyelő',
+    prompt: 'Ellenorizd a kanban tablat (curl -s http://localhost:3420/api/kanban). Ha van olyan kartya aminek ma jar le a hatrideje vagy urgent prioritasu es meg nincs done, szolj Telegramon. Ha minden rendben, ne irj semmit.',
+    schedule: '0 */2 * * *',
+  },
+  full: {
+    desc: 'Teljes ellenőrzés',
+    prompt: 'Ellenorizd: 1) Naptar - van-e meeting 1 oran belul? 2) Email - jott-e surgos level az elmult oraban? 3) Kanban - van-e mai hataridovel kartya? Ha BARMIT talalsz ami fontos, szolj Telegramon tomoren. Ha minden csendes, ne irj semmit.',
+    schedule: '*/15 * * * *',
+  },
+}
+
+document.getElementById('heartbeatTemplate').addEventListener('change', () => {
+  const tpl = HEARTBEAT_TEMPLATES[document.getElementById('heartbeatTemplate').value]
+  if (!tpl) return
+  document.getElementById('scheduleDesc').value = tpl.desc
+  document.getElementById('schedulePrompt').value = tpl.prompt
+  document.getElementById('scheduleCustomCron').value = tpl.schedule
+  scheduleFrequency.value = 'custom'
+  customScheduleGroup.hidden = false
+  scheduleTimeGroup.hidden = true
+})
+
 scheduleFrequency.addEventListener('change', () => {
   const freq = scheduleFrequency.value
   const needsTime = ['daily', 'weekdays', 'weekly-mon', 'weekly-fri'].includes(freq)
@@ -1357,6 +1405,9 @@ function resetScheduleForm() {
   document.getElementById('expandStatus').textContent = ''
   expandAnswers = []
   document.getElementById('scheduleEditName').value = ''
+  document.getElementById('scheduleType').value = 'task'
+  document.getElementById('heartbeatTemplateGroup').hidden = true
+  document.getElementById('heartbeatTemplate').value = ''
   saveScheduleBtn.disabled = false
   saveScheduleBtn.querySelector('.btn-text').hidden = false
   saveScheduleBtn.querySelector('.btn-loading').hidden = true
@@ -1514,6 +1565,7 @@ function renderScheduleList(tasks) {
       <div class="schedule-info">
         <div class="schedule-title">
           ${escapeHtml(task.description || task.name)}
+          ${task.type === 'heartbeat' ? '<span class="badge badge-heartbeat">💓 heartbeat</span>' : ''}
           <span class="badge ${task.enabled ? 'badge-active' : 'badge-paused'}">${task.enabled ? 'aktív' : 'szünet'}</span>
         </div>
         <div class="schedule-meta">
@@ -1914,6 +1966,7 @@ saveScheduleBtn.addEventListener('click', async () => {
   const prompt = document.getElementById('schedulePrompt').value.trim()
   const schedule = getScheduleCron()
   const agent = document.getElementById('scheduleAgent').value
+  const type = document.getElementById('scheduleType').value
 
   if (!name) { document.getElementById('scheduleName').focus(); return }
   if (!prompt) { document.getElementById('schedulePrompt').focus(); return }
@@ -1929,7 +1982,7 @@ saveScheduleBtn.addEventListener('click', async () => {
       const res = await fetch(`/api/schedules/${encodeURIComponent(editName)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description, prompt, schedule, agent }),
+        body: JSON.stringify({ description, prompt, schedule, agent, type }),
       })
       if (!res.ok) {
         const err = await res.json()
@@ -1941,7 +1994,7 @@ saveScheduleBtn.addEventListener('click', async () => {
       const res = await fetch('/api/schedules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description, prompt, schedule, agent }),
+        body: JSON.stringify({ name, description, prompt, schedule, agent, type }),
       })
       if (!res.ok) {
         const err = await res.json()
