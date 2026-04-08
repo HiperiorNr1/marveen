@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "agent",
-            "prompt": "A kontextus hamarosan tömörítődik. Nézd át az eddigi beszélgetést és mentsd el a fontos dolgokat a memória API-ba. Használd a curl parancsokat:\n\n1. Fontos döntések, preferenciák, tanulságok -> curl -s -X POST http://localhost:3420/api/memories -H 'Content-Type: application/json' -d '{\"agent_id\":\"marveen\",\"content\":\"...\",\"tier\":\"warm\",\"keywords\":\"...\"}'\n\n2. Aktív feladatok, pending dolgok -> tier: hot\n\n3. Napi napló bejegyzés -> curl -s -X POST http://localhost:3420/api/daily-log -H 'Content-Type: application/json' -d '{\"agent_id\":\"marveen\",\"content\":\"...\"}'\n\nCSAK a tényleg fontos, nem nyilvánvaló dolgokat mentsd. Ne mentsd ami a kódból kiderül.",
+            "prompt": "A kontextus hamarosan tömörítődik. Nézd át az eddigi beszélgetést és mentsd el a fontos dolgokat a memória API-ba.\n\nFONTOS: Az agent_id-t a CLAUDE.md-ből derítsd ki (a fájl elején szerepel a neved). Ha nem találod, nézd meg a munkamappa nevét (agents/NEVET). Ha az sem segít, használd: marveen.\n\nHasználd a curl parancsokat:\n\n1. Fontos döntések, preferenciák, tanulságok -> curl -s -X POST http://localhost:3420/api/memories -H 'Content-Type: application/json' -d '{\"agent_id\":\"SAJAT_NEVED\",\"content\":\"...\",\"tier\":\"warm\",\"keywords\":\"...\"}'\n\n2. Aktív feladatok, pending dolgok -> tier: hot\n\n3. Napi napló bejegyzés -> curl -s -X POST http://localhost:3420/api/daily-log -H 'Content-Type: application/json' -d '{\"agent_id\":\"SAJAT_NEVED\",\"content\":\"...\"}'\n\nCSAK a tényleg fontos, nem nyilvánvaló dolgokat mentsd. Ne mentsd ami a kódból kiderül.",
             "timeout": 120
           }
         ]
