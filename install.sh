@@ -189,6 +189,27 @@ if ! ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
 fi
 echo -e "  ${GREEN}✓${NC} Ollama + nomic-embed-text kész"
 
+# Optional: download a local LLM for agents
+echo ""
+echo -e "${DIM}  Az ágensek lokális modellel is futtathatók (adatbiztonság, nincs felhő).${NC}"
+echo -e "${DIM}  Elérhető modellek:${NC}"
+echo -e "${DIM}    1. qwen3.5:9b  (~6 GB) - gyors, jó minőség${NC}"
+echo -e "${DIM}    2. gemma4:31b  (~19 GB) - legjobb lokális minőség${NC}"
+echo -e "${DIM}    3. Kihagyás (később is letöltheted: ollama pull <modell>)${NC}"
+read -p "  Melyiket töltse le? (1/2/3) [3]: " LLM_CHOICE
+LLM_CHOICE=${LLM_CHOICE:-3}
+if [ "$LLM_CHOICE" = "1" ]; then
+  echo -e "  qwen3.5:9b letöltése..."
+  ollama pull qwen3.5:9b
+  echo -e "  ${GREEN}✓${NC} qwen3.5:9b kész"
+elif [ "$LLM_CHOICE" = "2" ]; then
+  echo -e "  gemma4:31b letöltése (ez eltarthat pár percig)..."
+  ollama pull gemma4:31b
+  echo -e "  ${GREEN}✓${NC} gemma4:31b kész"
+else
+  echo -e "  ${DIM}Kihagyva. Később: ollama pull qwen3.5:9b${NC}"
+fi
+
 # Step 7: LaunchAgent setup
 echo ""
 echo -e "${BOLD}[7/7] Automatikus inditas beallitasa...${NC}"
