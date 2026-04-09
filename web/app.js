@@ -2149,12 +2149,26 @@ async function loadMemStats() {
   try {
     const res = await fetch('/api/memories/stats')
     const stats = await res.json()
+    const embCount = stats.withEmbedding || 0
+    const embPct = stats.total > 0 ? Math.round(embCount / stats.total * 100) : 0
     memStats.innerHTML = `
-      <div class="stat-card"><div class="stat-value">${stats.total}</div><div class="stat-label">Összes</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.total}</div><div class="stat-label">Osszes</div></div>
       ${Object.entries(stats.byTier || {}).map(([tier, count]) =>
         `<div class="stat-card"><div class="stat-value" style="color:${tierColors[tier] || 'var(--accent)'}">${count}</div><div class="stat-label">${tierLabels[tier] || tier}</div></div>`
       ).join('')}
+      <div class="stat-card"><div class="stat-value">${embCount}</div><div class="stat-label">Vektorok (${embPct}%)</div></div>
+      <button class="btn-secondary btn-compact" id="memBackfillBtn" style="margin-left:auto;font-size:11px;padding:6px 12px;align-self:center">Vektorok generalasa</button>
     `
+    document.getElementById('memBackfillBtn')?.addEventListener('click', async () => {
+      const btn = document.getElementById('memBackfillBtn')
+      if (btn) { btn.textContent = 'Generalas...'; btn.disabled = true }
+      try {
+        const r = await fetch('/api/memories/backfill', { method: 'POST' })
+        const data = await r.json()
+        showToast(`${data.count} emlekhez vektor generalva`)
+        loadMemStats()
+      } catch { showToast('Hiba a vektor generalas soran') }
+    })
   } catch (err) {
     console.error('Stats hiba:', err)
   }
@@ -2164,8 +2178,12 @@ async function loadMemories() {
   if (currentMemTier === 'log' || currentMemTier === 'graph') return
   const q = memSearchInput.value.trim()
   const agent = document.getElementById('memAgentFilter').value
+  const searchMode = document.getElementById('memSearchMode')?.value || 'hybrid'
   const params = new URLSearchParams()
-  if (q) params.set('q', q)
+  if (q) {
+    params.set('q', q)
+    params.set('mode', searchMode)
+  }
   if (agent) params.set('agent', agent)
   if (currentMemTier) params.set('tier', currentMemTier)
   params.set('limit', '50')
@@ -2717,7 +2735,27 @@ async function loadConnectors() {
   }
 }
 
+const BUILTIN_MCPS = [
+  { name: 'computer-use', label: 'Computer Use', desc: 'Képernyő vezérlés, kattintás, gépelés', enableHint: 'Engedélyezés: tmux attach -> /mcp -> computer-use -> Enable' },
+  { name: 'chrome', label: 'Claude in Chrome', desc: 'Böngésző automatizálás', enableHint: '--chrome flag-gel indítva' },
+]
+
 function renderConnectors() {
+  // Builtin grid
+  const builtinGrid = document.getElementById('connectorBuiltinGrid')
+  builtinGrid.innerHTML = ''
+  for (const b of BUILTIN_MCPS) {
+    const isActive = connectors.some(c => c.name.toLowerCase().includes(b.name))
+    const div = document.createElement('div')
+    div.className = 'connector-builtin'
+    div.innerHTML = `
+      <div class="connector-status-dot ${isActive ? 'connected' : 'unknown'}"></div>
+      <div class="connector-builtin-name">${escapeHtml(b.label)}<br><span style="font-size:11px;color:var(--text-muted);font-weight:400">${escapeHtml(b.desc)}</span></div>
+      <span class="connector-builtin-action" title="${escapeHtml(b.enableHint)}">${isActive ? 'Aktív' : 'Kikapcsolva'}</span>
+    `
+    builtinGrid.appendChild(div)
+  }
+
   // Stats
   const connected = connectors.filter(c => c.status === 'connected').length
   const needsAuth = connectors.filter(c => c.status === 'needs_auth').length

@@ -13,6 +13,7 @@ import {
   pauseTask, resumeTask, updateTask,
   searchMemories, getMemoriesForChat, getDb,
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
+  hybridSearch, backfillEmbeddings, generateEmbedding,
   appendDailyLog, getDailyLog, getDailyLogDates,
   listKanbanCards, getKanbanCard, createKanbanCard,
   updateKanbanCard, moveKanbanCard, archiveKanbanCard,
@@ -1560,10 +1561,18 @@ Rovid leiras: "${finalPrompt}"`
         const agentId = url.searchParams.get('agent') || ''
         const tier = url.searchParams.get('tier') || url.searchParams.get('category') || ''
         const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
+        const mode = url.searchParams.get('mode') || 'fts'
 
         let results: Memory[]
-        if (q && agentId) {
+        if (q && mode === 'hybrid') {
+          results = await hybridSearch(agentId || 'marveen', q, limit)
+        } else if (q && agentId) {
           results = searchAgentMemories(agentId, q, limit)
+          if (results.length === 0) {
+            const db2 = getDb()
+            results = db2.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?")
+              .all(agentId, `%${q}%`, `%${q}%`, limit) as Memory[]
+          }
         } else if (q) {
           results = searchMemories(q, ALLOWED_CHAT_ID, limit)
           if (results.length === 0) {
@@ -1580,10 +1589,21 @@ Rovid leiras: "${finalPrompt}"`
 
         const formatted = results.map(m => ({
           ...m,
+          embedding: undefined, // Don't send embedding data to frontend
           created_label: new Date(m.created_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' }),
           accessed_label: new Date(m.accessed_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' }),
         }))
         return json(res, formatted)
+      }
+
+      if (path === '/api/memories/backfill' && method === 'POST') {
+        try {
+          const count = await backfillEmbeddings()
+          return json(res, { ok: true, count })
+        } catch (err) {
+          logger.error({ err }, 'Backfill failed')
+          return json(res, { error: 'Backfill failed' }, 500)
+        }
       }
 
       if (path === '/api/memories/stats' && method === 'GET') {

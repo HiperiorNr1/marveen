@@ -1532,6 +1532,16 @@ main {
   color: var(--text);
   outline: none;
 }
+.mem-search-mode {
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  outline: none;
+}
 
 /* === Memory Tabs === */
 .mem-tabs {
@@ -2238,6 +2248,45 @@ main {
   margin-bottom: 24px;
   flex-wrap: wrap;
 }
+
+.connector-section-header {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  margin-top: 20px;
+}
+.connector-section-header:first-of-type { margin-top: 0; }
+
+.connector-builtin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.connector-builtin {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.connector-builtin-name {
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1;
+}
+.connector-builtin-action {
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.connector-builtin-action:hover { text-decoration: underline; }
 
 .connector-grid {
   display: grid;
