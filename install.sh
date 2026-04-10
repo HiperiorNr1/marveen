@@ -189,6 +189,35 @@ if ! ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
 fi
 echo -e "  ${GREEN}✓${NC} Ollama + nomic-embed-text kész"
 
+# Whisper (speech-to-text for video transcription)
+echo ""
+echo -e "  Whisper telepítés (beszéd -> szöveg leirat)..."
+if command -v mlx_whisper &>/dev/null || [ -f "$HOME/.local/bin/mlx_whisper" ]; then
+  echo -e "  ${GREEN}✓${NC} mlx-whisper már telepítve (Apple Silicon optimalizált)"
+elif command -v whisper &>/dev/null; then
+  echo -e "  ${GREEN}✓${NC} whisper már telepítve"
+  echo -e "  ${DIM}  Tipp: pipx install mlx-whisper gyorsabb Apple Silicon-on${NC}"
+else
+  if command -v pipx &>/dev/null; then
+    pipx install mlx-whisper 2>/dev/null && echo -e "  ${GREEN}✓${NC} mlx-whisper telepítve" || {
+      brew install openai-whisper 2>/dev/null
+      echo -e "  ${GREEN}✓${NC} openai-whisper telepítve"
+    }
+  else
+    brew install pipx 2>/dev/null && pipx install mlx-whisper 2>/dev/null && echo -e "  ${GREEN}✓${NC} mlx-whisper telepítve" || {
+      brew install openai-whisper 2>/dev/null
+      echo -e "  ${GREEN}✓${NC} openai-whisper telepítve"
+    }
+  fi
+fi
+
+# ffmpeg (audio/video processing)
+if ! command -v ffmpeg &>/dev/null; then
+  echo -e "  ffmpeg telepítés..."
+  brew install ffmpeg
+fi
+echo -e "  ${GREEN}✓${NC} ffmpeg kész"
+
 # Optional: download a local LLM for agents
 echo ""
 echo -e "${DIM}  Az ágensek lokális modellel is futtathatók (adatbiztonság, nincs felhő).${NC}"
