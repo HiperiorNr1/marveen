@@ -85,6 +85,6 @@ Ha hasznos számodra a Marveen, támogasd a fejlesztést:
 
 ## Készítette
 
-**Szóta Szabolcs** -- AI konzultáns, az "AI a mindennapokban" csatorna készítője
+**Szota Szabolcs** -- AI konzultáns, az "AI a mindennapokban" csatorna készítője
 
 [![GitHub](https://img.shields.io/github/stars/Szotasz/marveen?style=social)](https://github.com/Szotasz/marveen)
