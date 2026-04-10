@@ -69,6 +69,22 @@ Időzített feladatok és heartbeat monitorok beállítása:
 - Claude Code CLI (Claude Max/Pro előfizetés szükséges)
 - Telegram fiók
 
-## Támogatás
+## Közösség és támogatás
 
-Kérdésed van? Csatlakozz a közösséghez: [Skool](https://skool.com/ai-a-mindennapokban)
+Kérdésed van? Csatlakozz az AI a mindennapokban közösséghez:
+
+- **Skool közösség**: [skool.com/ai-a-mindennapokban](https://skool.com/ai-a-mindennapokban) -- oktatóanyagok, kérdések, tapasztalatcsere
+- **YouTube**: [AI a mindennapokban](https://www.youtube.com/@aiamindennapokban) -- videók, tutorialok
+- **Weboldal**: [aiamindennapokban.hu](https://aiamindennapokban.hu)
+
+## Támogasd a projektet
+
+Ha hasznos számodra a Marveen, támogasd a fejlesztést:
+
+[![Támogatás](https://img.shields.io/badge/Támogatás-Donably-orange)](https://donably.com/szotaszabolcs)
+
+## Készítette
+
+**Szóta Szabolcs** -- AI konzultáns, az "AI a mindennapokban" csatorna készítője
+
+[![GitHub](https://img.shields.io/github/stars/Szotasz/marveen?style=social)](https://github.com/Szotasz/marveen)
