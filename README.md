@@ -81,7 +81,7 @@ Kérdésed van? Csatlakozz az AI a mindennapokban közösséghez:
 
 Ha hasznos számodra a Marveen, támogasd a fejlesztést:
 
-[![Támogatás](https://img.shields.io/badge/Támogatás-Donably-orange)](https://donably.com/szotaszabolcs)
+[![Támogatás](https://img.shields.io/badge/Támogatás-Donably-orange)](https://www.donably.com/ai-a-mindennapokban-szabolccsal)
 
 ## Készítette
 
