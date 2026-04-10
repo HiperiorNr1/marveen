@@ -29,7 +29,9 @@ CLAUDE.md
 mcp-servers/
 
 # Personal/project-specific docs (not part of the product)
-REBUILD_PROMPT*.md
+# Old rebuild prompts (keep V3 which is the current one)
+REBUILD_PROMPT.md
+REBUILD_PROMPT_V2.md
 SKOOL_*.md
 alkuszokatas_dashboard.md
 napindito-prompt.md
