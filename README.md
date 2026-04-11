@@ -1,5 +1,7 @@
 # Marveen
 
+![Marveen Banner](banner.png)
+
 > AI csapatod, ami fut amíg te alszol.
 
 Marveen egy AI asszisztens keretrendszer, ami Claude Code-ra épül. Saját AI csapatot építhetsz, akik Telegramon kommunikálnak veled, önállóan dolgoznak, és egymással is együttműködnek.
