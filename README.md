@@ -79,6 +79,24 @@ Időzített feladatok és heartbeat monitorok beállítása:
 ./scripts/start.sh
 ```
 
+### VPS telepítés (szerver)
+
+Linux VPS-en (Ubuntu/Debian) az `install.sh` változtatás nélkül fut. Az egyetlen különbség: a bejelentkezéshez token kell, mert nincs böngésző.
+
+```bash
+# 1. A SAJÁT gépeden (ahol van böngésző):
+claude setup-token
+# Másold ki a generált tokent (sk-ant-oat01-...)
+
+# 2. A VPS-en:
+export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+git clone https://github.com/Szotasz/marveen.git
+cd marveen
+./install.sh
+```
+
+A token 1 évig érvényes. Ne állíts be `ANTHROPIC_API_KEY`-t mellé.
+
 ## Követelmények
 
 - macOS, Linux, vagy Windows 10/11 (WSL-lel)
