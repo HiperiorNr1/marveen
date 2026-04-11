@@ -3435,6 +3435,166 @@ async function loadStatus() {
   }
 }
 
+// ============================================================
+// === Memory Import ===
+// ============================================================
+
+const memImportOverlay = document.getElementById('memImportOverlay')
+const memImportFileInput = document.getElementById('memImportFile')
+const memImportFileArea = document.getElementById('memImportFileArea')
+const memImportFileNames = document.getElementById('memImportFileNames')
+const memImportSaveBtn = document.getElementById('memImportSaveBtn')
+const memImportProgress = document.getElementById('memImportProgress')
+const memImportStatus = document.getElementById('memImportStatus')
+const memImportResult = document.getElementById('memImportResult')
+let memImportFiles = []
+
+// Open import modal
+document.getElementById('memImportOpenBtn').addEventListener('click', () => {
+  memImportFiles = []
+  memImportFileInput.value = ''
+  memImportFileNames.textContent = ''
+  memImportProgress.hidden = true
+  memImportResult.hidden = true
+  memImportSaveBtn.querySelector('.btn-text').hidden = false
+  memImportSaveBtn.querySelector('.btn-loading').hidden = true
+  memImportSaveBtn.disabled = false
+
+  // Populate agent dropdown from existing agents
+  const importAgentSel = document.getElementById('memImportAgent')
+  const memAgentSel = document.getElementById('memAgent')
+  importAgentSel.innerHTML = memAgentSel.innerHTML
+  openModal(memImportOverlay)
+})
+
+// Close import modal
+document.getElementById('memImportClose').addEventListener('click', () => closeModal(memImportOverlay))
+memImportOverlay.addEventListener('click', (e) => { if (e.target === memImportOverlay) closeModal(memImportOverlay) })
+
+// File area click -> trigger file input
+memImportFileArea.addEventListener('click', () => memImportFileInput.click())
+
+// Drag and drop
+memImportFileArea.addEventListener('dragover', (e) => {
+  e.preventDefault()
+  memImportFileArea.style.borderColor = 'var(--accent)'
+})
+memImportFileArea.addEventListener('dragleave', () => {
+  memImportFileArea.style.borderColor = ''
+})
+memImportFileArea.addEventListener('drop', (e) => {
+  e.preventDefault()
+  memImportFileArea.style.borderColor = ''
+  const files = Array.from(e.dataTransfer.files).filter(f =>
+    f.name.endsWith('.md') || f.name.endsWith('.txt') || f.name.endsWith('.json')
+  )
+  if (files.length) {
+    memImportFiles = files
+    memImportFileNames.textContent = files.map(f => f.name).join(', ')
+  }
+})
+
+// File input change
+memImportFileInput.addEventListener('change', () => {
+  memImportFiles = Array.from(memImportFileInput.files)
+  memImportFileNames.textContent = memImportFiles.map(f => f.name).join(', ')
+})
+
+// Parse file into chunks (client-side)
+async function parseFileToChunks(file) {
+  const text = await file.text()
+  const ext = file.name.split('.').pop().toLowerCase()
+
+  if (ext === 'json') {
+    try {
+      const data = JSON.parse(text)
+      if (Array.isArray(data)) {
+        return data.map(item => {
+          if (typeof item === 'object' && item !== null) return item.content || item.text || item.value || JSON.stringify(item)
+          return String(item)
+        }).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+      }
+      return Object.entries(data).map(([k, v]) => `${k}: ${v}`).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+    } catch { return [text.slice(0, 2000)] }
+  }
+
+  if (ext === 'md') {
+    return text.split(/\n(?=##?\s)/).map(s => s.trim()).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+  }
+
+  // txt: split by paragraphs
+  return text.split(/\n\n+/).map(s => s.trim()).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+}
+
+// Import button click
+memImportSaveBtn.addEventListener('click', async () => {
+  if (!memImportFiles.length) {
+    showToast('Valassz legalabb egy fajlt')
+    return
+  }
+
+  memImportSaveBtn.querySelector('.btn-text').hidden = true
+  memImportSaveBtn.querySelector('.btn-loading').hidden = false
+  memImportSaveBtn.disabled = true
+  memImportProgress.hidden = false
+  memImportResult.hidden = true
+  memImportStatus.textContent = 'Fajlok feldolgozasa...'
+
+  try {
+    // Parse all files into chunks
+    let allChunks = []
+    for (const file of memImportFiles) {
+      const chunks = await parseFileToChunks(file)
+      allChunks = allChunks.concat(chunks)
+    }
+
+    if (allChunks.length === 0) {
+      memImportProgress.hidden = true
+      memImportSaveBtn.querySelector('.btn-text').hidden = false
+      memImportSaveBtn.querySelector('.btn-loading').hidden = true
+      memImportSaveBtn.disabled = false
+      showToast('Nincs importalhato tartalom a fajlokban')
+      return
+    }
+
+    memImportStatus.textContent = `${allChunks.length} chunk kategorizalasa es importalasa...`
+
+    const agentId = document.getElementById('memImportAgent').value || 'marveen'
+    const resp = await fetch('/api/memories/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: agentId, chunks: allChunks }),
+    })
+    const data = await resp.json()
+
+    memImportProgress.hidden = true
+
+    if (data.ok) {
+      const s = data.stats || {}
+      memImportResult.hidden = false
+      memImportResult.innerHTML = `
+        <div style="color:var(--text-primary);font-weight:600;margin-bottom:8px">Import kesz!</div>
+        <div style="font-size:13px;color:var(--text-secondary)">
+          Osszesen: <strong>${data.imported}</strong> emlek importalva<br>
+          Hot: ${s.hot || 0} | Warm: ${s.warm || 0} | Cold: ${s.cold || 0} | Shared: ${s.shared || 0}
+        </div>
+      `
+      showToast(`${data.imported} emlek importalva`)
+      loadMemories()
+      loadMemStats()
+    } else {
+      showToast('Hiba: ' + (data.error || 'Ismeretlen'))
+    }
+  } catch (err) {
+    memImportProgress.hidden = true
+    showToast('Hiba az importalas soran')
+  }
+
+  memImportSaveBtn.querySelector('.btn-text').hidden = false
+  memImportSaveBtn.querySelector('.btn-loading').hidden = true
+  memImportSaveBtn.disabled = false
+})
+
 // === Init ===
 populateAvatarGrid()
 loadMemAgents()

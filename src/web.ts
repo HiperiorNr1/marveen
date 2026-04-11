@@ -1618,6 +1618,85 @@ Rovid leiras: "${finalPrompt}"`
         return json(res, formatted)
       }
 
+      // POST /api/memories/import - Import memories with AI categorization
+      if (path === '/api/memories/import' && method === 'POST') {
+        const body = await readBody(req)
+        const { agent_id, chunks } = JSON.parse(body.toString()) as { agent_id: string; chunks: string[] }
+
+        if (!chunks || !Array.isArray(chunks) || chunks.length === 0) {
+          return json(res, { error: 'No chunks to import' }, 400)
+        }
+
+        const agentId = agent_id || 'marveen'
+        const stats = { hot: 0, warm: 0, cold: 0, shared: 0 }
+        let imported = 0
+
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i]
+
+          try {
+            // Ask Ollama to categorize (90s timeout for large models)
+            const controller = new AbortController()
+            const timeout = setTimeout(() => controller.abort(), 90000)
+
+            const catResponse = await fetch('http://localhost:11434/api/generate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                model: 'gemma4:31b',
+                prompt: `Categorize this memory into exactly one tier and generate keywords.
+
+Memory: "${chunk.slice(0, 500)}"
+
+Tiers:
+- hot: active tasks, pending decisions, things happening NOW
+- warm: preferences, config, project context, stable knowledge
+- cold: long-term lessons, historical decisions, archive
+- shared: information relevant to multiple agents
+
+Respond ONLY with JSON, nothing else:
+{"tier": "warm", "keywords": "keyword1, keyword2, keyword3"}`,
+                stream: false,
+              }),
+              signal: controller.signal,
+            })
+            clearTimeout(timeout)
+            const catData = await catResponse.json() as { response?: string }
+
+            let tier = 'warm'
+            let keywords = ''
+
+            try {
+              const jsonMatch = (catData.response || '').match(/\{[\s\S]*\}/)
+              if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0])
+                tier = ['hot', 'warm', 'cold', 'shared'].includes(parsed.tier) ? parsed.tier : 'warm'
+                keywords = parsed.keywords || ''
+              }
+            } catch {
+              // Default to warm if parsing fails
+            }
+
+            saveAgentMemory(agentId, chunk, tier, keywords, true)
+            stats[tier as keyof typeof stats]++
+            imported++
+
+            // Small delay to not overwhelm Ollama
+            if (i < chunks.length - 1) {
+              await new Promise(r => setTimeout(r, 200))
+            }
+          } catch {
+            // If Ollama fails, save as warm without categorization
+            saveAgentMemory(agentId, chunk, 'warm', '', true)
+            stats.warm++
+            imported++
+          }
+        }
+
+        logger.info({ agentId, imported, stats }, 'Memory import completed')
+        return json(res, { ok: true, imported, stats })
+      }
+
       if (path === '/api/memories/backfill' && method === 'POST') {
         try {
           const count = await backfillEmbeddings()
