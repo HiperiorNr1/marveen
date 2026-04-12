@@ -123,8 +123,8 @@ async function main() {
   for (const [key, value] of Object.entries(config)) {
     envContent += `${key}=${value}\n`
   }
-  writeFileSync(envPath, envContent)
-  ok('.env fajl letrehozva')
+  writeFileSync(envPath, envContent, { mode: 0o600 })
+  ok('.env fajl letrehozva (0600)')
 
   // CLAUDE.md szerkesztes
   header('5. CLAUDE.md testreszabas')

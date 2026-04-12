@@ -171,13 +171,14 @@ wsl bash -c @"
 cd $installPath
 
 # Create .env
-cat > .env << 'ENVEOF'
+(umask 077 && cat > .env << 'ENVEOF'
 TELEGRAM_BOT_TOKEN=$botToken
 ALLOWED_CHAT_ID=$chatId
 OWNER_NAME=$ownerName
 ENVEOF
-
-echo '  ✓ .env létrehozva'
+)
+chmod 600 .env
+echo '  ✓ .env létrehozva (chmod 600)'
 
 # Generate CLAUDE.md from template
 if [ -f templates/CLAUDE.md.template ]; then
@@ -191,7 +192,8 @@ mkdir -p store agents
 # Setup Telegram
 if [ -n '$botToken' ]; then
     mkdir -p ~/.claude/channels/telegram
-    echo 'TELEGRAM_BOT_TOKEN=$botToken' > ~/.claude/channels/telegram/.env
+    (umask 077 && echo 'TELEGRAM_BOT_TOKEN=$botToken' > ~/.claude/channels/telegram/.env)
+    chmod 600 ~/.claude/channels/telegram/.env
     echo '{"dmPolicy":"allowlist","allowFrom":["$chatId"],"groups":{},"pending":{}}' > ~/.claude/channels/telegram/access.json
     echo '  ✓ Telegram csatorna konfigurálva'
 fi
