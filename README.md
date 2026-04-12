@@ -16,6 +16,67 @@ Marveen egy AI asszisztens keretrendszer, ami Claude Code-ra épül. Saját AI c
 - **Memória**: Hot/Warm/Cold tier rendszer, kulcsszavas kereséssel és gráf nézettel
 - **MCP Connectorok**: Gmail, Calendar, Drive, Notion, Slack és más szolgáltatások
 - **Skillek**: Újrahasználható képességek az ágenseknek
+- **Öntanulás**: Az ágensek automatikusan tanulnak a munkájukból és skill-eket hoznak létre
+
+## Öntanulás (Self-Learning)
+
+A Marveen ágensek automatikusan tanulnak a munkájukból -- a Hermes Agent rendszeréből inspirálódva.
+
+### Hogyan működik?
+
+Az öntanulás 5 összekapcsolt mechanizmusra épül:
+
+#### 1. Nudge rendszer (reflexiós trigger)
+- A `PreCompact` hook minden kontextus-tömörítés előtt megkérdezi az ágenst: "Volt-e újrafelhasználható minta a munkádban?"
+- A 30 perces memória heartbeat szintén tartalmaz skill reflexiót
+- Az ágens saját ítélete alapján dönt, hogy mit ment el
+
+#### 2. Automatikus skill generálás
+Komplex feladatok után az ágensek automatikusan SKILL.md fájlokat hoznak létre. Triggerek:
+- 5+ tool hívás egy feladatban
+- Hiba utáni sikeres recovery
+- Felhasználói korrekció
+- Nem triviális, többlépéses workflow
+
+A generált skill-ek a `~/.claude/skills/` mappába kerülnek és azonnal elérhetőek.
+
+#### 3. Skill patch (runtime javítás)
+Ha egy ágens meglévő skill használata közben jobb megoldást talál:
+- Célzottan javítja a skill-t (nem írja újra az egészet)
+- A javítás okát dokumentálja a "Buktatók" szekcióban
+- A következő használatnál már a javított verzió fut
+
+#### 4. Progressive disclosure (token-hatékony betöltés)
+A skill-ek 3 szinten töltődnek be:
+- **Level 0**: Csak név + leírás (~100 szó) -- mindig elérhető a skill indexben
+- **Level 1**: Teljes SKILL.md tartalom -- csak ha az ágens relevánsnak ítéli
+- **Level 2**: Segédfájlok (scripts/, references/) -- csak specifikus szükséglet esetén
+
+A `scripts/skill-index.sh` automatikusan generálja a Level 0 indexet.
+
+#### 5. Skill Factory (meta-skill)
+Beépített meta-skill ami bármilyen bemutatott workflow-ból SKILL.md-t generál:
+- "Csinálj ebből skill-t" / "Tanítsd meg magad"
+- 6 lépéses eljárás: extract → generalize → write → supporting files → index → validate
+
+### Skill struktúra
+
+```
+~/.claude/skills/
+├── .skill-index.md          # Level 0 index (auto-generált)
+├── skill-factory/
+│   └── SKILL.md             # Meta-skill: workflow → skill konverzió
+├── youtube-video-seo/
+│   └── SKILL.md             # Példa: automatikusan generált skill
+└── my-custom-skill/
+    ├── SKILL.md             # Fő utasítások (<500 sor)
+    ├── scripts/             # Futtatható scriptek
+    └── references/          # Háttérdokumentáció
+```
+
+### Konfiguráció
+
+Az öntanulás a `settings.json` `PreCompact` hookján keresztül működik. A `templates/settings.json.template` tartalmazza az alapértelmezett konfigurációt, ami minden új ágensnél automatikusan beállítódik.
 
 ## Telepítés
 
