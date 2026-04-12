@@ -1062,7 +1062,7 @@ export function startWebServer(port = 3420): http.Server {
 
         const tgDir = join(agentDir(name), '.claude', 'channels', 'telegram')
         mkdirSync(tgDir, { recursive: true })
-        writeFileSync(join(tgDir, '.env'), `TELEGRAM_BOT_TOKEN=${botToken.trim()}\n`)
+        writeFileSync(join(tgDir, '.env'), `TELEGRAM_BOT_TOKEN=${botToken.trim()}\n`, { mode: 0o600 })
         writeFileSync(join(tgDir, 'access.json'), JSON.stringify({
           dmPolicy: 'allowlist',
           allowFrom: [ALLOWED_CHAT_ID],

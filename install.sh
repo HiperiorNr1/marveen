@@ -122,13 +122,15 @@ echo ""
 echo -e "${BOLD}[6/7] Konfiguracio letrehozasa...${NC}"
 
 # Create .env
-cat > "$INSTALL_DIR/.env" << ENVEOF
+(umask 077 && cat > "$INSTALL_DIR/.env" << ENVEOF
 # Marveen konfiguracio
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 ALLOWED_CHAT_ID=${CHAT_ID}
 OWNER_NAME=${OWNER_NAME}
 ENVEOF
-echo -e "  ${GREEN}✓${NC} .env letrehozva"
+)
+chmod 600 "$INSTALL_DIR/.env"
+echo -e "  ${GREEN}✓${NC} .env letrehozva (chmod 600)"
 
 # Create store directory
 mkdir -p "$INSTALL_DIR/store"
@@ -148,7 +150,8 @@ fi
 if [ -n "$BOT_TOKEN" ] && [ "$BOT_TOKEN" != "" ]; then
   TELEGRAM_DIR="$HOME/.claude/channels/telegram"
   mkdir -p "$TELEGRAM_DIR"
-  echo "TELEGRAM_BOT_TOKEN=$BOT_TOKEN" > "$TELEGRAM_DIR/.env"
+  (umask 077 && echo "TELEGRAM_BOT_TOKEN=$BOT_TOKEN" > "$TELEGRAM_DIR/.env")
+  chmod 600 "$TELEGRAM_DIR/.env"
   cat > "$TELEGRAM_DIR/access.json" << ACCESSEOF
 {
   "dmPolicy": "allowlist",
