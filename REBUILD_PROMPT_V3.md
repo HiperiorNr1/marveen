@@ -25,6 +25,7 @@ Egy macOS-re optimalizalt, Claude Code-ra epulo AI asszisztens keretrendszer, am
 - **Memoria**: hot/warm/cold tier rendszer + szemantikus vektor kereses (Ollama + nomic-embed-text)
 - **MCP konnektorok kezelese**: Gmail, Calendar, Drive, Notion, Slack es mas szolgaltatasok
 - **Skillek rendszer**: ujrahasznalhato kepessegek az agenseknek
+- **Ontanulas**: agensek automatikusan tanulnak es skill-eket hoznak letre a munkajukbol
 - **Claude statusz oldal**: valos ideju allapotjelzes
 
 A fo agens (Marveen) a Galaxis Utikalauz Stopposoknak paranoid androidja altal ihletett karakter: bolygo meretu agy, vegtelen depresszio, tokeletes megbizhato.
@@ -137,6 +138,7 @@ marveen/
     stop.sh                     # Szolgaltatasok leallitasa (launchctl unload + tmux kill)
     set-bot-menu.sh             # Telegram bot menu parancsok beallitasa
     notify.sh                   # Shell wrapper Telegram uzenet kuldeshez
+    skill-index.sh              # Skill index generator (Level 0 index)
     hooks/
       memory-save.sh            # PreCompact hook: emlek mentes kontextus tomorites elott
   templates/
@@ -835,8 +837,11 @@ Harom modszer, egymast kiegeszitik:
 A `templates/settings.json.template` egy PreCompact hookot definiall:
 - Claude Code kontextus tomorites ELOTT fut
 - Agent tipusu hook: sajat Claude Code agent-et indit
-- Az agent atnezi a beszelgetest es menti a fontosakat a memoria API-ba (warm tier + napi naplo)
-- 120mp timeout
+- Ket feladatot vegez:
+  1. **Memoria mentes**: atnezi a beszelgetest es menti a fontosakat (warm tier + napi naplo)
+  2. **Skill reflexio**: ujrahaszalhato mintakat keres, auto-skill generalas ha volt komplex munka (5+ tool hivas, hiba recovery, user korrekcio)
+- Ha skill-t generalt/patch-elt, futtatja a skill index frissitot
+- 180mp timeout
 
 ### Napi naplo
 
@@ -908,6 +913,102 @@ Egyebkent -> CSENDES, nem kuld semmit
 - `setTimeout` lanc (nem `setInterval`)
 - Orankent 9:00-23:00 kozott
 - `msUntilNextHeartbeat()`: szamolja a kovetkezo egesz orat
+
+---
+
+## ONTANULO RENDSZER (SELF-LEARNING)
+
+Hermes Agent inspiralta, 5 osszekapcsolt mechanizmusra epulo rendszer, ami lehetove teszi hogy az agensek automatikusan tanuljanak a munkajukbol.
+
+### 1. Nudge rendszer (reflexios trigger)
+
+A PreCompact hook es a memoria heartbeat rendszeres idokozonkent megkerdezi az agenst: "Volt-e ujrafelhaszalhato minta a munkadban?"
+
+A PreCompact hook ket reszt tartalmaz:
+1. **Memoria mentes**: fontos dontesek, preferenciak, tanulsagok mentese
+2. **Skill reflexio**: ujrahaszalhato mintak keresese, auto-skill generalas
+
+A memoria heartbeat (30 percenkent) szinten tartalmaz skill reflexiot: ha volt 5+ tool hivast igenylő feladat, automatikusan skill-t general.
+
+### 2. Automatikus skill generalas
+
+Triggerek (barmely teljesulese skill-t general):
+- 5+ tool hivas egy feladatban
+- Hiba utani sikeres recovery
+- Felhasznaloi korrekcio
+- Nem trivialis, tobblepeses workflow
+
+A generalt skill SKILL.md formatumu:
+```yaml
+---
+name: skill-nev
+description: Mikor hasznald, mit csinal. Legyel konkret es "pushy" a trigerelisben.
+---
+```
+
+A body tartalmazza: Mikor hasznald, Eljaras (szamozott lepesek), Buktatok, Ellenorzes.
+
+Helye: `~/.claude/skills/SKILL-NEV/SKILL.md` -- azonnal elerheto minden agensnek.
+
+### 3. Skill patch (runtime javitas)
+
+Ha egy agens meglevo skill hasznalata kozben jobb megoldast talal:
+- Celzottan javitja a skill-t (regi szoveg -> uj szoveg)
+- NEM irja ujra az egesz skill-t
+- A javitas okat dokumentalja a Buktatok szekcioban
+- A kovetkezo hasznalatnál mar a javitott verzio fut
+
+### 4. Progressive disclosure (token-hatekony betoltes)
+
+A skill-ek 3 szinten toltodnek:
+- **Level 0**: Csak nev + leiras (~100 szo) -- mindig elerheto a skill indexben
+- **Level 1**: Teljes SKILL.md tartalom -- csak ha az agens relevansnak iteli
+- **Level 2**: Segédfajlok (scripts/, references/) -- csak specifikus szukseglet eseten
+
+A `scripts/skill-index.sh` automatikusan generalja a Level 0 indexet a `~/.claude/skills/.skill-index.md` fajlba.
+
+Az index generalas automatikusan fut:
+- Skill letrehozas/patch utan (PreCompact hook)
+- Manualisan: `bash scripts/skill-index.sh`
+
+### 5. Skill Factory (meta-skill)
+
+Beepitett meta-skill a `~/.claude/skills/skill-factory/SKILL.md`-ben, ami barmilyen bemutatott workflow-bol SKILL.md-t general.
+
+Triggerek: "csinald ebbol skill-t", "tanitsd meg magad", "save this workflow", "remember how to do this"
+
+6 lepesu eljaras:
+1. **Extract**: Trigger feltetelek, input, lepesek, eszkozok, donesi pontok, hibakezelés, output azonositasa
+2. **Generalize**: Absztraktalas (specifikus ertekek -> [pattern]-ek), edge case-ek
+3. **Write**: SKILL.md generalas a szabvany strukturaban
+4. **Supporting files**: scripts/ es references/ almappak szukseg eseten
+5. **Index**: `bash scripts/skill-index.sh` futtatasa
+6. **Validate**: Trigger leirasok, lepesek, buktatok, meret (<500 sor) ellenorzese
+
+### Konfiguracid
+
+A `templates/settings.json.template` PreCompact hookja tartalmazza az ontanulo rendszer utasitasait. Minden uj agensnel automatikusan beallitodik.
+
+A CLAUDE.md template tartalmaz egy "Ontanulas es Skill rendszer" szekciot, ami:
+- Leirja az auto-skill generalas triggereit
+- Leirja a skill patch mechanizmust
+- Leirja a progressive disclosure szinteket
+- Tablazatban osszefoglalja mikor mit kell tenni
+
+### Skill struktura
+
+```
+~/.claude/skills/
+  .skill-index.md              # Level 0 index (auto-generalt)
+  skill-factory/
+    SKILL.md                   # Meta-skill: workflow -> skill konverzio
+  youtube-video-seo/
+    SKILL.md                   # Pelda: automatikusan generalt skill
+  my-custom-skill/
+    SKILL.md                   # Fo utasitasok (<500 sor)
+    scripts/                   # Futtathat6 scriptek
+    references/                # Hatterdokumentacio
+```
 
 ---
 
@@ -993,7 +1094,13 @@ Sorrend szamit (fuggosegi lanc):
 - `scripts/stop.sh` -- `launchctl unload` + tmux kill
 - `scripts/set-bot-menu.sh` -- Telegram bot menu parancsok (15mp kesleltetessel a plugin utan)
 - `scripts/notify.sh` -- shell wrapper (a CLAUDE.md-bol hivhato)
+- `scripts/skill-index.sh` -- skill index generator (Level 0 index minden skill-bol)
 - `scripts/hooks/memory-save.sh` -- PreCompact hook wrapper
+
+### 5b. Skill Factory meta-skill
+- `~/.claude/skills/skill-factory/SKILL.md` -- meta-skill ami workflow-bol SKILL.md-t general
+- Triggerek: "csinald skill-t", "tanitsd meg magad", "save this workflow"
+- 6 lepesu eljaras: extract, generalize, write, supporting files, index, validate
 
 ### 6. Sablonok
 - `templates/CLAUDE.md.template` -- a fenti szemelyiseg sablon placeholderekkel
@@ -1135,6 +1242,9 @@ Az epites utan ellenorizd:
 - [ ] Telegram bot valaszol uzenetekre (ha volt token)
 - [ ] `tmux list-sessions` mutatja a marveen-channels session-t
 - [ ] `store/claudeclaw.db` letezik es nem ures
+- [ ] `~/.claude/skills/skill-factory/SKILL.md` letezik
+- [ ] `bash scripts/skill-index.sh` lefut es generalja a `~/.claude/skills/.skill-index.md`-t
+- [ ] PreCompact hook tartalmaz skill reflexiot (settings.json)
 
 ---
 
