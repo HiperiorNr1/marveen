@@ -342,11 +342,23 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo ""
 echo -e "${BOLD}${GREEN}  ✓ Marveen sikeresen telepitve!${NC}"
 echo ""
-echo -e "  ${BOLD}Dashboard:${NC} http://localhost:3420"
+
+# Read dashboard token for access URL
+DASH_TOKEN=""
+if [ -f "$INSTALL_DIR/store/.dashboard-token" ]; then
+  DASH_TOKEN=$(cat "$INSTALL_DIR/store/.dashboard-token")
+fi
+if [ -n "$DASH_TOKEN" ]; then
+  echo -e "  ${BOLD}Dashboard:${NC} ${BLUE}http://localhost:3420/?token=${DASH_TOKEN}${NC}"
+  echo -e "  ${DIM}(Nyisd meg egyszer, utana a bongeszo megjegyzi a tokent)${NC}"
+else
+  echo -e "  ${BOLD}Dashboard:${NC} http://localhost:3420"
+  echo -e "  ${DIM}(A tokenes URL-t a szerver logban talalod)${NC}"
+fi
 echo -e "  ${BOLD}Telegram:${NC} Irj a botodnak!"
 echo ""
 echo -e "  ${DIM}Kovetkezo lepesek:${NC}"
-echo -e "  ${DIM}1. Nyisd meg a dashboardot${NC}"
+echo -e "  ${DIM}1. Nyisd meg a dashboardot a fenti URL-lel${NC}"
 echo -e "  ${DIM}2. Menj a Csapat oldalra${NC}"
 echo -e "  ${DIM}3. Hozz letre agenseket a csapatodba${NC}"
 echo ""
