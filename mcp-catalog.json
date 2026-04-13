@@ -10,19 +10,22 @@
     "args": ["-y", "@piotr-agier/google-drive-mcp"],
     "env": {},
     "authType": "oauth",
-    "authNote": "Első használatkor a böngészőben kell bejelentkezni a Google fiókba"
+    "authNote": "Első használatkor a böngészőben kell bejelentkezni a Google fiókba",
+    "infoUrl": "https://github.com/piotr-agier/google-drive-mcp"
   },
   {
     "id": "gmail",
     "name": "Gmail",
-    "description": "Email küldés, olvasás, keresés, címkézés, szűrők kezelése",
-    "type": "remote",
+    "description": "Email küldés, olvasás, keresés, címkézés, szűrők, melléklet letöltés",
+    "type": "local",
     "category": "productivity",
     "icon": "📧",
-    "url": "https://gmail.mcp.claude.com/mcp",
+    "command": "npx",
+    "args": ["-y", "gmail-mcp-server"],
     "env": {},
     "authType": "oauth",
-    "authNote": "Első használatkor a Claude.ai-on kell engedélyezni a Gmail hozzáférést"
+    "authNote": "Első használatkor OAuth bejelentkezés szükséges a böngészőben",
+    "infoUrl": "https://github.com/ArtyMcLabin/Gmail-MCP-Server"
   },
   {
     "id": "google-calendar",
@@ -34,7 +37,8 @@
     "url": "https://gcal.mcp.claude.com/mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "Első használatkor a Claude.ai-on kell engedélyezni a Calendar hozzáférést"
+    "authNote": "Első használatkor a Claude.ai-on kell engedélyezni a Calendar hozzáférést",
+    "infoUrl": "https://docs.anthropic.com/en/docs/agents-and-tools/remote-mcp-servers"
   },
   {
     "id": "notion",
@@ -46,7 +50,8 @@
     "url": "https://mcp.notion.com/mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "Csatlakozás után a Notion felületén kell engedélyezni"
+    "authNote": "Csatlakozás után a Notion felületén kell engedélyezni",
+    "infoUrl": "https://www.notion.com/help/mcp"
   },
   {
     "id": "slack",
@@ -58,7 +63,8 @@
     "url": "https://mcp.slack.com/mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "Csatlakozás után a Slack felületén kell engedélyezni a workspace-t"
+    "authNote": "Csatlakozás után a Slack felületén kell engedélyezni a workspace-t",
+    "infoUrl": "https://api.slack.com/docs/mcp"
   },
   {
     "id": "brave-search",
@@ -71,7 +77,8 @@
     "args": ["-y", "@modelcontextprotocol/server-brave-search"],
     "env": {"BRAVE_API_KEY": ""},
     "authType": "apikey",
-    "authNote": "API kulcs: https://brave.com/search/api/"
+    "authNote": "API kulcs: https://brave.com/search/api/",
+    "infoUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search"
   },
   {
     "id": "filesystem",
@@ -83,7 +90,8 @@
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/"],
     "env": {},
-    "authType": "none"
+    "authType": "none",
+    "infoUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"
   },
   {
     "id": "github",
@@ -96,7 +104,8 @@
     "args": ["-y", "@modelcontextprotocol/server-github"],
     "env": {"GITHUB_TOKEN": ""},
     "authType": "apikey",
-    "authNote": "Personal Access Token: GitHub Settings -> Developer Settings -> Personal Access Tokens"
+    "authNote": "Personal Access Token: GitHub Settings -> Developer Settings -> Personal Access Tokens",
+    "infoUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/github"
   },
   {
     "id": "fal-ai",
@@ -108,7 +117,8 @@
     "url": "https://server.smithery.ai/aiamindennapokban/fal-ai-mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "A Smithery felületén kell bejelentkezni és engedélyezni (smithery.ai)"
+    "authNote": "A Smithery felületén kell bejelentkezni és engedélyezni (smithery.ai)",
+    "infoUrl": "https://smithery.ai/server/fal-ai-mcp"
   },
   {
     "id": "billingo",
@@ -120,7 +130,8 @@
     "url": "https://server.smithery.ai/aiamindennapokban/billingo-mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "A Smithery felületén kell bejelentkezni és engedélyezni (smithery.ai)"
+    "authNote": "A Smithery felületén kell bejelentkezni és engedélyezni (smithery.ai)",
+    "infoUrl": "https://smithery.ai/server/billingo-mcp"
   },
   {
     "id": "wise",
@@ -132,7 +143,8 @@
     "url": "https://server.smithery.ai/aiamindennapokban/wise-mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "A Smithery felületén kell bejelentkezni és engedélyezni (smithery.ai)"
+    "authNote": "A Smithery felületén kell bejelentkezni és engedélyezni (smithery.ai)",
+    "infoUrl": "https://smithery.ai/server/wise-mcp"
   },
   {
     "id": "fireflies",
@@ -144,6 +156,7 @@
     "url": "https://api.fireflies.ai/mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "Csatlakozás után a Fireflies felületén kell engedélyezni"
+    "authNote": "Csatlakozás után a Fireflies felületén kell engedélyezni",
+    "infoUrl": "https://docs.fireflies.ai/mcp"
   }
 ]

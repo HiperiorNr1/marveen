@@ -2614,6 +2614,14 @@ main {
   align-items: center;
   gap: 8px;
 }
+.catalog-card-link {
+  font-size: 13px;
+  color: var(--accent);
+  text-decoration: none;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.catalog-card-link:hover { opacity: 1; }
 .catalog-card-type {
   font-size: 10px;
   font-weight: 600;

@@ -3233,6 +3233,7 @@ function renderCatalog() {
           <div class="catalog-card-name">
             ${escapeHtml(item.name)}
             <span class="catalog-card-type ${item.type}">${item.type}</span>
+            ${item.infoUrl ? `<a href="${escapeHtml(item.infoUrl)}" target="_blank" rel="noopener" class="catalog-card-link" title="Dokumentáció megnyitása" onclick="event.stopPropagation()">&#x2197;</a>` : ''}
           </div>
           <div class="catalog-card-desc">${escapeHtml(item.description)}</div>
         </div>
