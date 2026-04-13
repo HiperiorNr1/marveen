@@ -7,7 +7,7 @@
     "category": "productivity",
     "icon": "📁",
     "command": "npx",
-    "args": ["-y", "@anthropic-ai/google-drive-mcp"],
+    "args": ["-y", "@piotr-agier/google-drive-mcp"],
     "env": {},
     "authType": "oauth",
     "authNote": "Első használatkor a böngészőben kell bejelentkezni a Google fiókba"
@@ -16,27 +16,25 @@
     "id": "gmail",
     "name": "Gmail",
     "description": "Email küldés, olvasás, keresés, címkézés, szűrők kezelése",
-    "type": "local",
+    "type": "remote",
     "category": "productivity",
     "icon": "📧",
-    "command": "npx",
-    "args": ["-y", "@anthropic-ai/gmail-mcp"],
+    "url": "https://gmail.mcp.claude.com/mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "Első használatkor a böngészőben kell bejelentkezni"
+    "authNote": "Első használatkor a Claude.ai-on kell engedélyezni a Gmail hozzáférést"
   },
   {
     "id": "google-calendar",
     "name": "Google Calendar",
     "description": "Naptár események létrehozása, módosítása, lekérdezése, meghívók kezelése",
-    "type": "local",
+    "type": "remote",
     "category": "productivity",
     "icon": "📅",
-    "command": "npx",
-    "args": ["-y", "@anthropic-ai/google-calendar-mcp"],
+    "url": "https://gcal.mcp.claude.com/mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "Első használatkor a böngészőben kell bejelentkezni"
+    "authNote": "Első használatkor a Claude.ai-on kell engedélyezni a Calendar hozzáférést"
   },
   {
     "id": "notion",
@@ -57,7 +55,7 @@
     "type": "remote",
     "category": "communication",
     "icon": "💬",
-    "url": "https://mcp.slack.com/sse",
+    "url": "https://mcp.slack.com/mcp",
     "env": {},
     "authType": "oauth",
     "authNote": "Csatlakozás után a Slack felületén kell engedélyezni a workspace-t"
@@ -70,7 +68,7 @@
     "category": "search",
     "icon": "🔍",
     "command": "npx",
-    "args": ["-y", "@anthropic-ai/brave-search-mcp"],
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
     "env": {"BRAVE_API_KEY": ""},
     "authType": "apikey",
     "authNote": "API kulcs: https://brave.com/search/api/"
@@ -83,7 +81,7 @@
     "category": "system",
     "icon": "💾",
     "command": "npx",
-    "args": ["-y", "@anthropic-ai/filesystem-mcp", "/"],
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/"],
     "env": {},
     "authType": "none"
   },
@@ -95,7 +93,7 @@
     "category": "development",
     "icon": "🐙",
     "command": "npx",
-    "args": ["-y", "@anthropic-ai/github-mcp"],
+    "args": ["-y", "@modelcontextprotocol/server-github"],
     "env": {"GITHUB_TOKEN": ""},
     "authType": "apikey",
     "authNote": "Personal Access Token: GitHub Settings -> Developer Settings -> Personal Access Tokens"
@@ -107,7 +105,7 @@
     "type": "remote",
     "category": "ai",
     "icon": "🎨",
-    "url": "https://fal.ai/mcp",
+    "url": "https://server.smithery.ai/aiamindennapokban/fal-ai-mcp",
     "env": {},
     "authType": "oauth",
     "authNote": "Csatlakozás után a fal.ai felületén kell bejelentkezni"
@@ -119,7 +117,7 @@
     "type": "remote",
     "category": "finance",
     "icon": "🧾",
-    "url": "https://mcp.billingo.hu/mcp",
+    "url": "https://server.smithery.ai/aiamindennapokban/billingo-mcp",
     "env": {},
     "authType": "oauth",
     "authNote": "Csatlakozás után a Billingo felületén kell engedélyezni"
@@ -131,7 +129,7 @@
     "type": "remote",
     "category": "finance",
     "icon": "💸",
-    "url": "https://mcp.wise.com/mcp",
+    "url": "https://server.smithery.ai/aiamindennapokban/wise-mcp",
     "env": {},
     "authType": "oauth",
     "authNote": "Csatlakozás után a Wise felületén kell engedélyezni"
@@ -143,7 +141,7 @@
     "type": "remote",
     "category": "productivity",
     "icon": "🎙️",
-    "url": "https://mcp.fireflies.ai/mcp",
+    "url": "https://api.fireflies.ai/mcp",
     "env": {},
     "authType": "oauth",
     "authNote": "Csatlakozás után a Fireflies felületén kell engedélyezni"
