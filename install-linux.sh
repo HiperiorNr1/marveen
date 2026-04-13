@@ -92,6 +92,13 @@ else
   ok "bun telepitve"
 fi
 
+# Telegram plugin telepites
+echo -e "  Telegram plugin telepites..."
+claude plugin install telegram@claude-plugins-official 2>/dev/null || {
+  warn "Telegram plugin telepites nem sikerult automatikusan. Kesobb futtasd: claude plugin install telegram@claude-plugins-official"
+}
+ok "Telegram plugin"
+
 # --- [3/6] Ollama telepites ---
 echo ""
 echo -e "${BOLD}[3/6] Ollama telepitese...${NC}"

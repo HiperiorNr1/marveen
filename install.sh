@@ -176,9 +176,13 @@ ACCESSEOF
 fi
 
 # Install Telegram plugin
-echo -e "  Telegram plugin telepítés..."
-claude plugin install telegram@claude-plugins-official 2>/dev/null || true
-echo -e "  ${GREEN}✓${NC} Telegram plugin"
+echo -e "  Telegram plugin telepites..."
+if claude plugin install telegram@claude-plugins-official 2>/dev/null; then
+  echo -e "  ${GREEN}✓${NC} Telegram plugin telepitve"
+else
+  echo -e "  ${ORANGE}Telegram plugin telepites nem sikerult automatikusan.${NC}"
+  echo -e "  ${DIM}Kesobb futtasd: claude plugin install telegram@claude-plugins-official${NC}"
+fi
 
 # Ollama + nomic-embed-text (szemantikus kereséshez)
 echo ""
