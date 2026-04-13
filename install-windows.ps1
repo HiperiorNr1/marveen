@@ -106,6 +106,14 @@ if ! command -v claude &>/dev/null; then
     sudo npm install -g @anthropic-ai/claude-code
 fi
 echo '  ✓ Claude Code CLI'
+
+# Bun (Telegram plugin fuggoseg)
+if ! command -v bun &>/dev/null; then
+    echo '  Bun telepítése...'
+    curl -fsSL https://bun.sh/install | bash
+    export PATH="\$HOME/.bun/bin:\$PATH"
+fi
+echo '  ✓ Bun'
 "@
 
 Write-Host "  ✓ Függőségek telepítve" -ForegroundColor Green

@@ -82,6 +82,16 @@ if ! grep -q '\.local/bin' ~/.bashrc 2>/dev/null; then
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
+# Bun (Telegram channels plugin fuggoseg)
+if command -v bun &>/dev/null; then
+  ok "bun mar telepitve: $(bun --version)"
+else
+  echo -e "  Bun telepitese (Telegram plugin fuggoseg)..."
+  curl -fsSL https://bun.sh/install | bash
+  export PATH="$HOME/.bun/bin:$PATH"
+  ok "bun telepitve"
+fi
+
 # --- [3/6] Ollama telepites ---
 echo ""
 echo -e "${BOLD}[3/6] Ollama telepitese...${NC}"

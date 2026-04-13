@@ -63,6 +63,14 @@ if [ "$MISSING" -eq 1 ]; then
   echo -e "${GREEN}✓ Fuggosegek telepitve${NC}"
 fi
 
+# Bun (required by Telegram channels plugin)
+if ! command -v bun &>/dev/null; then
+  echo -e "  ${ORANGE}Bun telepitese (Telegram plugin fuggoseg)...${NC}"
+  curl -fsSL https://bun.sh/install | bash
+  export PATH="$HOME/.bun/bin:$PATH"
+fi
+check_cmd "bun" "Bun runtime"
+
 # Check Claude Code CLI
 echo ""
 if ! command -v claude &>/dev/null; then
