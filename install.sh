@@ -82,9 +82,9 @@ echo -e "  ${GREEN}✓${NC} Claude Code CLI"
 echo ""
 echo -e "${BOLD}[2/7] Claude bejelentkezes${NC}"
 echo -e "${DIM}  Ha meg nem jelentkeztel be, most megteheted.${NC}"
-read -p "  Szeretned most futtatni a 'claude auth'-ot? (i/n) " DO_AUTH
+read -p "  Szeretned most bejelentkezni? (i/n) " DO_AUTH
 if [ "$DO_AUTH" = "i" ]; then
-  claude auth
+  claude auth login
 fi
 
 # Step 3: Personal info
