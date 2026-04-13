@@ -159,11 +159,23 @@ function findAvatarForAgent(name: string): string | null {
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6'
 
+// Map short model names to full Claude model IDs (backwards compat with old configs)
+const MODEL_ALIASES: Record<string, string> = {
+  'opus': 'claude-opus-4-6',
+  'sonnet': 'claude-sonnet-4-6',
+  'haiku': 'claude-haiku-4-5-20251001',
+  'inherit': DEFAULT_MODEL,
+}
+
+function resolveModelId(raw: string): string {
+  return MODEL_ALIASES[raw] || raw
+}
+
 function readAgentModel(name: string): string {
   const configPath = join(agentDir(name), 'agent-config.json')
   try {
     const config = JSON.parse(readFileOr(configPath, '{}'))
-    return config.model || DEFAULT_MODEL
+    return resolveModelId(config.model || DEFAULT_MODEL)
   } catch {
     return DEFAULT_MODEL
   }
@@ -958,7 +970,7 @@ export function startWebServer(port = 3420): http.Server {
         const data = JSON.parse(body.toString())
         const { description, model: rawModel } = data as { name: string; description: string; model?: string }
         const name = sanitizeAgentName(data.name || '')
-        const model = rawModel || DEFAULT_MODEL
+        const model = resolveModelId(rawModel || DEFAULT_MODEL)
 
         if (!name) return json(res, { error: 'Name is required' }, 400)
         if (!description) return json(res, { error: 'Description is required' }, 400)
