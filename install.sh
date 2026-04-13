@@ -99,8 +99,9 @@ fi
 echo ""
 echo -e "${BOLD}[3/7] Szemelyes beallitasok${NC}"
 read -p "  Mi a neved? " OWNER_NAME
-read -p "  Telegram chat ID-d (ha tudod, egyebkent hagyd uresen): " CHAT_ID
-CHAT_ID=${CHAT_ID:-"0"}
+# Chat ID is NOT asked here -- the user doesn't know it yet.
+# It will be set automatically during the Telegram pairing flow.
+CHAT_ID="0"
 
 # Step 4: Telegram bot setup
 echo ""
@@ -162,8 +163,8 @@ if [ -n "$BOT_TOKEN" ] && [ "$BOT_TOKEN" != "" ]; then
   chmod 600 "$TELEGRAM_DIR/.env"
   cat > "$TELEGRAM_DIR/access.json" << ACCESSEOF
 {
-  "dmPolicy": "allowlist",
-  "allowFrom": ["${CHAT_ID}"],
+  "dmPolicy": "pairing",
+  "allowFrom": [],
   "groups": {},
   "pending": {}
 }
@@ -366,12 +367,15 @@ else
   echo -e "  ${BOLD}Dashboard:${NC} http://localhost:3420"
   echo -e "  ${DIM}(A tokenes URL-t a szerver logban talalod)${NC}"
 fi
-echo -e "  ${BOLD}Telegram:${NC} Irj a botodnak!"
+echo -e "  ${BOLD}Telegram:${NC} Irj a botodnak es parosits!"
 echo ""
 echo -e "  ${DIM}Kovetkezo lepesek:${NC}"
 echo -e "  ${DIM}1. Nyisd meg a dashboardot a fenti URL-lel${NC}"
-echo -e "  ${DIM}2. Menj a Csapat oldalra${NC}"
-echo -e "  ${DIM}3. Hozz letre agenseket a csapatodba${NC}"
+echo -e "  ${DIM}2. Irj a Telegram botodnak -- kapsz egy parosito kodot${NC}"
+echo -e "  ${DIM}3. A terminalban futtasd: claude${NC}"
+echo -e "  ${DIM}4. Ird be: /telegram:access pair AKOD${NC}"
+echo -e "  ${DIM}5. Zard le: /telegram:access policy allowlist${NC}"
+echo -e "  ${DIM}6. A Csapat oldalon hozhatsz letre agenseket${NC}"
 echo ""
 echo -e "  ${DIM}Frissites: ./update.sh${NC}"
 echo -e "  ${DIM}Leallitas: ./scripts/stop.sh${NC}"

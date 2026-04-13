@@ -173,7 +173,7 @@ Write-Host "[5/5] Konfiguráció..." -ForegroundColor White
 
 $ownerName = Read-Host "  Mi a neved?"
 $botToken = Read-Host "  Telegram bot token (vagy hagyd üresen)"
-$chatId = Read-Host "  Telegram chat ID (vagy hagyd üresen)"
+$chatId = "0"
 
 wsl bash -c @"
 cd $installPath
@@ -202,7 +202,7 @@ if [ -n '$botToken' ]; then
     mkdir -p ~/.claude/channels/telegram
     (umask 077 && echo 'TELEGRAM_BOT_TOKEN=$botToken' > ~/.claude/channels/telegram/.env)
     chmod 600 ~/.claude/channels/telegram/.env
-    echo '{"dmPolicy":"allowlist","allowFrom":["$chatId"],"groups":{},"pending":{}}' > ~/.claude/channels/telegram/access.json
+    echo '{"dmPolicy":"pairing","allowFrom":[],"groups":{},"pending":{}}' > ~/.claude/channels/telegram/access.json
     echo '  ✓ Telegram csatorna konfigurálva'
 fi
 
