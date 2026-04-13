@@ -374,7 +374,7 @@ Description of what the agent should do: ${description}
 Model: ${model}
 
 Generate a comprehensive CLAUDE.md that includes:
-- Clear role and responsibilities
+- Clear role and responsibilities based on the description above
 - Behavioral guidelines
 - Communication style
 - Language rules (Hungarian with Szabolcs, English for code/technical)
@@ -383,7 +383,12 @@ Generate a comprehensive CLAUDE.md that includes:
 
 The owner is Szabolcs (Szota Szabolcs), an AI consultant from Budapest.
 
-IMPORTANT: The CLAUDE.md MUST include the following memory system section at the end (copy it exactly, replacing AGENT_NAME with ${name}):
+IMPORTANT FORMATTING RULES:
+- Write ALL Hungarian text with proper accents (á, é, í, ó, ö, ő, ú, ü, ű). NEVER write Hungarian without accents.
+- The agent's first line description should reflect what the user typed as description, in Hungarian with accents.
+- Never use em dash (—), only simple hyphen (-).
+
+IMPORTANT: The CLAUDE.md MUST include the following sections at the end (copy them exactly, replacing AGENT_NAME with ${name}):
 
 ## Memoria rendszer
 
@@ -405,6 +410,17 @@ curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: applicatio
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
 curl -s "http://localhost:3420/api/memories?agent=AGENT_NAME&q=KULCSSZO&tier=warm"
+
+## Ütemezett feladatok
+
+Az ütemezett feladatok a ~/.claude/scheduled-tasks/ mappában élnek, fájl-alapúak (SKILL.md + task-config.json). A schedule runner 60 másodpercenként ellenőrzi és a te tmux session-ödbe küldi a promptot.
+
+Feladat létrehozása API-n keresztül:
+curl -s -X POST http://localhost:3420/api/schedules -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d '{"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt", "schedule": "0 8 * * *", "agent": "AGENT_NAME", "type": "heartbeat"}'
+
+Típusok: task (mindig szól az eredménnyel) vagy heartbeat (csak fontosnál szól).
+Cron formátum: perc óra nap hónap hétnapja (pl. 0 8 * * * = minden nap 8:00).
+NE írd közvetlenül az SQLite scheduled_tasks táblát - az egy régi API.
 
 Output ONLY the markdown content, no code fences.`
 
@@ -1932,10 +1948,16 @@ Respond ONLY with JSON, nothing else:
       // === Marveen (self) API ===
       if (path === '/api/marveen' && method === 'GET') {
         const claudeMd = readFileOr(join(PROJECT_ROOT, 'CLAUDE.md'), '')
-        const soulSection = claudeMd.match(/## Szemelyiseg\n\n([\s\S]*?)(?=\n## )/)?.[1]?.trim() || ''
+        const soulSection = claudeMd.match(/## Személyiség\n\n([\s\S]*?)(?=\n## )/)?.[1]?.trim()
+          || claudeMd.match(/## Szemelyiseg\n\n([\s\S]*?)(?=\n## )/)?.[1]?.trim()
+          || ''
+        // Extract description from CLAUDE.md first line after "# " header, or personality section
+        const firstLine = claudeMd.match(/^Te .+$/m)?.[0]?.trim() || ''
+        const descFromPersonality = soulSection.split('\n').filter(l => l.trim()).slice(0, 2).join(' ').slice(0, 200)
+        const description = firstLine || descFromPersonality || `${OWNER_NAME} AI asszisztense`
         return json(res, {
           name: 'Marveen',
-          description: 'Szabolcs fo AI asszisztense. Bolygo meretu agy, vegtelen depresszio, tokeletes megbizhato.',
+          description,
           model: 'claude-opus-4-6',
           running: true,
           hasTelegram: true,
