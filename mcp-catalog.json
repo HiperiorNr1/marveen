@@ -171,6 +171,6 @@
     "env": {},
     "authType": "oauth",
     "authNote": "Csatlakozás után a Fireflies felületén kell engedélyezni",
-    "infoUrl": "https://fireflies.ai/integrations/claude"
+    "infoUrl": "https://fireflies.ai/blog/fireflies-mcp-server/"
   }
 ]
