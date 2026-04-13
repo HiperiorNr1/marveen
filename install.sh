@@ -184,6 +184,14 @@ else
   echo -e "  ${DIM}Kesobb futtasd: claude plugin install telegram@claude-plugins-official${NC}"
 fi
 
+# Install skill-factory (self-learning meta-skill)
+SKILLS_DIR="$HOME/.claude/skills"
+if [ -d "$INSTALL_DIR/skills/skill-factory" ]; then
+  mkdir -p "$SKILLS_DIR/skill-factory"
+  cp -r "$INSTALL_DIR/skills/skill-factory/"* "$SKILLS_DIR/skill-factory/"
+  echo -e "  ${GREEN}✓${NC} skill-factory telepitve"
+fi
+
 # Ollama + nomic-embed-text (szemantikus kereséshez)
 echo ""
 echo -e "  Ollama ellenőrzés (szemantikus memória kereséshez)..."

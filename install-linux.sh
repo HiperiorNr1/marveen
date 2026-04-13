@@ -99,6 +99,14 @@ claude plugin install telegram@claude-plugins-official 2>/dev/null || {
 }
 ok "Telegram plugin"
 
+# Install skill-factory (self-learning meta-skill)
+SKILLS_DIR="$HOME/.claude/skills"
+if [ -d "$INSTALL_DIR/skills/skill-factory" ]; then
+  mkdir -p "$SKILLS_DIR/skill-factory"
+  cp -r "$INSTALL_DIR/skills/skill-factory/"* "$SKILLS_DIR/skill-factory/"
+  ok "skill-factory telepitve"
+fi
+
 # --- [3/6] Ollama telepites ---
 echo ""
 echo -e "${BOLD}[3/6] Ollama telepitese...${NC}"
