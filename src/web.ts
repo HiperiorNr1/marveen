@@ -869,7 +869,7 @@ function startScheduleRunner(): NodeJS.Timeout {
       for (const agentName of targetAgents) {
 
       const isMarveen = agentName === 'marveen'
-      const session = isMarveen ? 'claudeclaw-channels' : agentSessionName(agentName)
+      const session = isMarveen ? 'marveen-channels' : agentSessionName(agentName)
 
       // Check if the target session exists
       let sessionExists = false
