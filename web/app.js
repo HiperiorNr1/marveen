@@ -2450,8 +2450,8 @@ function buildGraph(memories) {
       id: mem.id,
       x: w / 2 + (Math.random() - 0.5) * w * 0.6,
       y: h / 2 + (Math.random() - 0.5) * h * 0.6,
-      vx: (Math.random() - 0.5) * 2,
-      vy: (Math.random() - 0.5) * 2,
+      vx: 0,
+      vy: 0,
       radius: 6,
       connectionCount: 0,
       label: label,
@@ -2504,11 +2504,94 @@ function buildGraph(memories) {
   }
 }
 
+function simulateGraphStep(damping) {
+  const w = graphCanvas.width / (window.devicePixelRatio || 1)
+  const h = graphCanvas.height / (window.devicePixelRatio || 1)
+  const nodes = graphNodes
+
+  const tierCenters = {}
+  for (const node of nodes) {
+    if (!tierCenters[node.tier]) tierCenters[node.tier] = { x: 0, y: 0, count: 0 }
+    tierCenters[node.tier].x += node.x
+    tierCenters[node.tier].y += node.y
+    tierCenters[node.tier].count++
+  }
+  for (const tier of Object.keys(tierCenters)) {
+    tierCenters[tier].x /= tierCenters[tier].count
+    tierCenters[tier].y /= tierCenters[tier].count
+  }
+  for (const node of nodes) {
+    const tc = tierCenters[node.tier]
+    if (tc) {
+      node.vx += (tc.x - node.x) * 0.0005
+      node.vy += (tc.y - node.y) * 0.0005
+    }
+  }
+
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      let dx = nodes[j].x - nodes[i].x
+      let dy = nodes[j].y - nodes[i].y
+      let dist = Math.sqrt(dx * dx + dy * dy) || 1
+      let force = 800 / (dist * dist)
+      let fx = (dx / dist) * force
+      let fy = (dy / dist) * force
+      nodes[i].vx -= fx
+      nodes[i].vy -= fy
+      nodes[j].vx += fx
+      nodes[j].vy += fy
+    }
+  }
+
+  for (const edge of graphEdges) {
+    const a = nodes[edge.source]
+    const b = nodes[edge.target]
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let dist = Math.sqrt(dx * dx + dy * dy) || 1
+    let force = (dist - 80) * 0.005 * edge.strength
+    let fx = (dx / dist) * force
+    let fy = (dy / dist) * force
+    a.vx += fx
+    a.vy += fy
+    b.vx -= fx
+    b.vy -= fy
+  }
+
+  for (const node of nodes) {
+    node.vx += (w / 2 - node.x) * 0.001
+    node.vy += (h / 2 - node.y) * 0.001
+  }
+
+  const maxV = 6
+  for (const node of nodes) {
+    if (node === graphDragging) continue
+    node.vx *= damping
+    node.vy *= damping
+    if (node.vx > maxV) node.vx = maxV; else if (node.vx < -maxV) node.vx = -maxV
+    if (node.vy > maxV) node.vy = maxV; else if (node.vy < -maxV) node.vy = -maxV
+    node.x += node.vx
+    node.y += node.vy
+    node.x = Math.max(-200, Math.min(w + 200, node.x))
+    node.y = Math.max(-200, Math.min(h + 200, node.y))
+  }
+}
+
 function startGraphSimulation() {
   if (graphSim) cancelAnimationFrame(graphSim)
 
+  for (const node of graphNodes) {
+    node.vx = 0
+    node.vy = 0
+  }
+
+  const preSettleIterations = Math.min(250, 40 + graphNodes.length * 2)
+  for (let i = 0; i < preSettleIterations; i++) {
+    simulateGraphStep(0.88)
+  }
+
   let frame = 0
-  const maxFrames = 300
+  const maxFrames = 60
 
   function tick() {
     if (frame > maxFrames) {
@@ -2517,82 +2600,7 @@ function startGraphSimulation() {
     }
     frame++
     graphAnimFrame = frame
-    const damping = 0.95 + (frame / maxFrames) * 0.04
-
-    const w = graphCanvas.width / (window.devicePixelRatio || 1)
-    const h = graphCanvas.height / (window.devicePixelRatio || 1)
-    const nodes = graphNodes
-
-    // Tier clustering force: gently push same-tier nodes toward each other
-    const tierCenters = {}
-    for (const node of nodes) {
-      if (!tierCenters[node.tier]) tierCenters[node.tier] = { x: 0, y: 0, count: 0 }
-      tierCenters[node.tier].x += node.x
-      tierCenters[node.tier].y += node.y
-      tierCenters[node.tier].count++
-    }
-    for (const tier of Object.keys(tierCenters)) {
-      tierCenters[tier].x /= tierCenters[tier].count
-      tierCenters[tier].y /= tierCenters[tier].count
-    }
-    for (const node of nodes) {
-      const tc = tierCenters[node.tier]
-      if (tc) {
-        node.vx += (tc.x - node.x) * 0.0005
-        node.vy += (tc.y - node.y) * 0.0005
-      }
-    }
-
-    // Repulsion (all nodes push each other away)
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        let dx = nodes[j].x - nodes[i].x
-        let dy = nodes[j].y - nodes[i].y
-        let dist = Math.sqrt(dx * dx + dy * dy) || 1
-        let force = 800 / (dist * dist)
-        let fx = (dx / dist) * force
-        let fy = (dy / dist) * force
-        nodes[i].vx -= fx
-        nodes[i].vy -= fy
-        nodes[j].vx += fx
-        nodes[j].vy += fy
-      }
-    }
-
-    // Attraction (edges pull connected nodes together)
-    for (const edge of graphEdges) {
-      const a = nodes[edge.source]
-      const b = nodes[edge.target]
-      let dx = b.x - a.x
-      let dy = b.y - a.y
-      let dist = Math.sqrt(dx * dx + dy * dy) || 1
-      let force = (dist - 80) * 0.005 * edge.strength
-      let fx = (dx / dist) * force
-      let fy = (dy / dist) * force
-      a.vx += fx
-      a.vy += fy
-      b.vx -= fx
-      b.vy -= fy
-    }
-
-    // Center gravity
-    for (const node of nodes) {
-      node.vx += (w / 2 - node.x) * 0.001
-      node.vy += (h / 2 - node.y) * 0.001
-    }
-
-    // Apply velocity with damping
-    for (const node of nodes) {
-      if (node === graphDragging) continue
-      node.vx *= damping
-      node.vy *= damping
-      node.x += node.vx
-      node.y += node.vy
-      // Bounds (allow overflow for panning)
-      node.x = Math.max(-200, Math.min(w + 200, node.x))
-      node.y = Math.max(-200, Math.min(h + 200, node.y))
-    }
-
+    simulateGraphStep(0.94 + (frame / maxFrames) * 0.05)
     renderGraph()
     graphSim = requestAnimationFrame(tick)
   }
