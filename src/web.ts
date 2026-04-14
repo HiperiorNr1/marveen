@@ -23,7 +23,7 @@ import {
   markMessageDone, markMessageFailed, listAgentMessages, getAgentMessage,
   type Memory, type AgentMessage,
 } from './db.js'
-import { OWNER_NAME, ALLOWED_CHAT_ID, HEARTBEAT_CALENDAR_ID } from './config.js'
+import { OWNER_NAME, BOT_NAME, ALLOWED_CHAT_ID, HEARTBEAT_CALENDAR_ID } from './config.js'
 import { wrapUntrusted } from './prompt-safety.js'
 
 function computeNextRun(cronExpression: string): number {
@@ -1956,7 +1956,7 @@ Respond ONLY with JSON, nothing else:
         const descFromPersonality = soulSection.split('\n').filter(l => l.trim()).slice(0, 2).join(' ').slice(0, 200)
         const description = firstLine || descFromPersonality || `${OWNER_NAME} AI asszisztense`
         return json(res, {
-          name: 'Marveen',
+          name: BOT_NAME,
           description,
           model: 'claude-opus-4-6',
           running: true,

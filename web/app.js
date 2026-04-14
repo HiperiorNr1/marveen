@@ -670,11 +670,12 @@ async function openMarveenDetail() {
   // Reuse the agent detail modal for Marveen
   currentAgent = { ...m, name: 'marveen', claudeMd: '', soulMd: '', mcpJson: '', skills: [] }
 
-  document.getElementById('agentDetailTitle').textContent = 'Marveen'
+  const displayName = m.name || 'Marveen'
+  document.getElementById('agentDetailTitle').textContent = displayName
   const avatar = document.getElementById('agentDetailAvatar')
   avatar.className = 'detail-avatar gradient-1'
-  avatar.innerHTML = `<img src="/api/marveen/avatar?t=${Date.now()}" alt="Marveen">`
-  document.getElementById('agentDetailName').textContent = 'Marveen'
+  avatar.innerHTML = `<img src="/api/marveen/avatar?t=${Date.now()}" alt="${escapeHtml(displayName)}">`
+  document.getElementById('agentDetailName').textContent = displayName
   document.getElementById('agentDetailDesc').textContent = m.description || ''
   document.getElementById('agentDetailModel').textContent = 'claude-opus-4-6'
   document.getElementById('agentDetailTgStatus').innerHTML = '<span class="tg-status"><span class="tg-dot connected"></span>Csatlakozva</span>'
@@ -692,7 +693,7 @@ async function openMarveenDetail() {
     const claudeRes = await fetch('/api/marveen')
     if (claudeRes.ok) {
       const data = await claudeRes.json()
-      document.getElementById('editClaudeMd').value = '(Marveen CLAUDE.md szerkesztése a projekt CLAUDE.md fájlban)'
+      document.getElementById('editClaudeMd').value = `(${displayName} CLAUDE.md szerkesztése a projekt CLAUDE.md fájlban)`
       document.getElementById('editSoulMd').value = data.personality || ''
       document.getElementById('editMcpJson').value = ''
     }
@@ -718,13 +719,14 @@ function renderAgents() {
   // Marveen card (always first)
   if (window._marveen) {
     const m = window._marveen
+    const displayName = m.name || 'Marveen'
     const mCard = document.createElement('div')
     mCard.className = 'agent-card marveen-card'
     mCard.innerHTML = `
       <div class="agent-card-top">
-        <div class="agent-avatar gradient-1"><img src="/api/marveen/avatar?t=${Date.now()}" alt="Marveen"></div>
+        <div class="agent-avatar gradient-1"><img src="/api/marveen/avatar?t=${Date.now()}" alt="${escapeHtml(displayName)}"></div>
         <div class="agent-card-info">
-          <div class="agent-name">Marveen <span class="marveen-badge">fo asszisztens</span></div>
+          <div class="agent-name">${escapeHtml(displayName)} <span class="marveen-badge">fo asszisztens</span></div>
           <div class="agent-desc">${escapeHtml(m.description || '')}</div>
         </div>
       </div>

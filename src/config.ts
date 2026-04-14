@@ -13,6 +13,7 @@ export const TELEGRAM_BOT_TOKEN = env['TELEGRAM_BOT_TOKEN'] ?? ''
 export const ALLOWED_CHAT_ID = env['ALLOWED_CHAT_ID'] ?? ''
 
 export const OWNER_NAME = env['OWNER_NAME'] ?? 'Szabolcs'
+export const BOT_NAME = env['BOT_NAME'] ?? 'Marveen'
 
 export const WEB_PORT = parseInt(env['WEB_PORT'] ?? '3420', 10)
 

@@ -145,6 +145,7 @@ echo -e "${BOLD}[6/7] Konfiguracio letrehozasa...${NC}"
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 ALLOWED_CHAT_ID=${CHAT_ID}
 OWNER_NAME=${OWNER_NAME}
+BOT_NAME=${BOT_NAME}
 ENVEOF
 )
 chmod 600 "$INSTALL_DIR/.env"
