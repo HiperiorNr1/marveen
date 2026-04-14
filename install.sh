@@ -64,10 +64,17 @@ if [ "$MISSING" -eq 1 ]; then
 fi
 
 # Bun (required by Telegram channels plugin)
+export PATH="$HOME/.bun/bin:$PATH"
 if ! command -v bun &>/dev/null; then
   echo -e "  ${ORANGE}Bun telepitese (Telegram plugin fuggoseg)...${NC}"
-  curl -fsSL https://bun.sh/install | bash
+  curl -fsSL https://bun.sh/install | bash 2>/dev/null
+  # Source the profile that bun installer modified
+  [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null
+  [ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" 2>/dev/null
   export PATH="$HOME/.bun/bin:$PATH"
+  if ! command -v bun &>/dev/null; then
+    echo -e "  ${RED}✗${NC} Bun telepites sikertelen. Probalj manuálisan: curl -fsSL https://bun.sh/install | bash"
+  fi
 fi
 check_cmd "bun" "Bun runtime"
 
@@ -177,11 +184,22 @@ fi
 
 # Install Telegram plugin
 echo -e "  Telegram plugin telepites..."
+# Ensure plugin registry is configured
+claude plugin add-registry claude-plugins-official https://github.com/anthropics/claude-plugins-official 2>/dev/null
+# Install the plugin (retry once if fails)
 if claude plugin install telegram@claude-plugins-official 2>/dev/null; then
   echo -e "  ${GREEN}✓${NC} Telegram plugin telepitve"
 else
-  echo -e "  ${ORANGE}Telegram plugin telepites nem sikerult automatikusan.${NC}"
-  echo -e "  ${DIM}Kesobb futtasd: claude plugin install telegram@claude-plugins-official${NC}"
+  echo -e "  ${ORANGE}Elso probalkozas sikertelen, ujraprobalok...${NC}"
+  sleep 2
+  if claude plugin install telegram@claude-plugins-official 2>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Telegram plugin telepitve (masodik probalkozesal)"
+  else
+    echo -e "  ${RED}✗${NC} Telegram plugin telepites sikertelen."
+    echo -e "  ${BOLD}Futtasd kesobb kezzel:${NC}"
+    echo -e "  ${BLUE}claude plugin install telegram@claude-plugins-official${NC}"
+    echo ""
+  fi
 fi
 
 # Install skill-factory (self-learning meta-skill)
@@ -348,6 +366,23 @@ echo -e "  ${GREEN}✓${NC} LaunchAgent-ek letrehozva"
 launchctl load "$PLIST_DIR/com.marveen.dashboard.plist" 2>/dev/null || true
 launchctl load "$PLIST_DIR/com.marveen.channels.plist" 2>/dev/null || true
 echo -e "  ${GREEN}✓${NC} Szolgaltatasok elinditva"
+
+# Verify Telegram plugin is working
+sleep 3
+echo ""
+echo -e "${BOLD}Ellenorzes...${NC}"
+if ! command -v bun &>/dev/null; then
+  echo -e "  ${RED}✗${NC} Bun nem talalhato. A Telegram plugin nem fog mukodni."
+  echo -e "  ${BOLD}Javitas:${NC} curl -fsSL https://bun.sh/install | bash"
+  echo -e "  ${DIM}Utana: source ~/.zshrc && ./scripts/start.sh${NC}"
+fi
+if ! claude plugin list 2>/dev/null | grep -q telegram; then
+  echo -e "  ${RED}✗${NC} Telegram plugin nincs telepitve."
+  echo -e "  ${BOLD}Javitas:${NC} claude plugin install telegram@claude-plugins-official"
+  echo -e "  ${DIM}Utana: ./scripts/stop.sh && ./scripts/start.sh${NC}"
+else
+  echo -e "  ${GREEN}✓${NC} Telegram plugin ellenorizve"
+fi
 
 # Telegram pairing flow
 if [ -n "$BOT_TOKEN" ] && [ "$BOT_TOKEN" != "" ]; then
