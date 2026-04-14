@@ -1382,7 +1382,7 @@ export function startWebServer(port = 3420): http.Server {
       if (path === '/api/schedules/agents' && method === 'GET') {
         const agentNames = listAgentNames()
         const agents = [
-          { name: 'marveen', label: 'Marveen', avatar: '/api/marveen/avatar' },
+          { name: 'marveen', label: BOT_NAME, avatar: '/api/marveen/avatar' },
           ...agentNames.map(n => ({ name: n, label: n, avatar: `/api/agents/${encodeURIComponent(n)}/avatar` }))
         ]
         return json(res, agents)
