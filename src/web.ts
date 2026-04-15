@@ -793,6 +793,12 @@ function startMessageRouter(): NodeJS.Timeout {
         continue
       }
 
+      if (!isSessionReadyForPrompt(session)) {
+        // Target is busy or has pending input. Leave message pending so we don't
+        // pile up prompts in the input buffer; router will retry on the next cycle.
+        continue
+      }
+
       try {
         // The sending agent's content may itself have been influenced by earlier
         // untrusted input (an email it summarized, a calendar invite it read).
@@ -832,6 +838,22 @@ function cronMatchesNow(cron: string, catchUpMs: number = 60000): boolean {
     const prevTime = prev.getTime()
     const now = Date.now()
     return (now - prevTime) < catchUpMs
+  } catch {
+    return false
+  }
+}
+
+// Check if a Claude Code tmux session is ready to accept a new prompt.
+// During Anthropic API outages or long-running tasks, scheduled prompts can pile up
+// in the input buffer because send-keys appends but Enter never submits.
+// This returns true only when the session shows the idle "bypass permissions" footer
+// and has no pending [Pasted text] blocks in the visible input area.
+function isSessionReadyForPrompt(session: string): boolean {
+  try {
+    const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    const hasIdleFooter = /bypass permissions on \(shift\+tab to cycle\)/.test(pane)
+    const hasPendingPaste = /\[Pasted text #\d+/.test(pane)
+    return hasIdleFooter && !hasPendingPaste
   } catch {
     return false
   }
@@ -880,6 +902,11 @@ function startScheduleRunner(): NodeJS.Timeout {
 
       if (!sessionExists) {
         logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session not running, skipping')
+        continue
+      }
+
+      if (!isSessionReadyForPrompt(session)) {
+        logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session busy or has pending input, skipping to avoid prompt pileup')
         continue
       }
 
