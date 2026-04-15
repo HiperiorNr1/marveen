@@ -4179,6 +4179,36 @@ async function openSkillDetail(skillName) {
   openModal(skillDetailOverlay)
 }
 
+// === Global Skill Import ===
+const globalImportSkillBtn = document.getElementById('globalImportSkillBtn')
+const globalSkillFileInput = document.getElementById('globalSkillFileInput')
+
+if (globalImportSkillBtn && globalSkillFileInput) {
+  globalImportSkillBtn.addEventListener('click', () => globalSkillFileInput.click())
+  globalSkillFileInput.addEventListener('change', async () => {
+    const file = globalSkillFileInput.files[0]
+    if (!file) return
+    globalImportSkillBtn.disabled = true
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await fetch('/api/skills/import', { method: 'POST', body: formData })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.error || 'Import hiba')
+      }
+      const result = await res.json()
+      showToast(`Skill importálva: ${result.imported.join(', ')}`)
+      loadGlobalSkills()
+    } catch (err) {
+      showToast(`Hiba: ${err.message}`)
+    } finally {
+      globalImportSkillBtn.disabled = false
+      globalSkillFileInput.value = ''
+    }
+  })
+}
+
 // === Init ===
 populateAvatarGrid()
 loadMemAgents()

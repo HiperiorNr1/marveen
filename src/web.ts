@@ -134,6 +134,90 @@ function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'"
 }
 
+// Extract a .skill (ZIP) file into targetDir.
+// Handles both nested layout (skill-name/SKILL.md) and flat layout (SKILL.md at root).
+// Returns names of imported skill directories, or throws on error.
+function extractSkillZip(zipPath: string, targetDir: string, uploadedFilename: string): string[] {
+  const listOutput = execSync(`unzip -Z1 ${shellEscape(zipPath)} 2>&1`, { timeout: 5000, encoding: 'utf-8' })
+  const entries = listOutput.split('\n').map((l) => l.trim()).filter(Boolean)
+
+  // Security: reject path traversal
+  for (const entry of entries) {
+    if (entry.includes('..') || entry.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(entry)) {
+      throw Object.assign(new Error('path traversal'), { code: 'PATH_TRAVERSAL' })
+    }
+  }
+
+  // Determine layout from ZIP contents (before extracting anything)
+  // Nested: some entry looks like "dirname/SKILL.md"
+  // Flat: top-level "SKILL.md" present
+  const isFlat = entries.some(e => e === 'SKILL.md')
+  const nestedDirs = [...new Set(
+    entries
+      .filter(e => e.includes('/') && e.split('/')[1] === 'SKILL.md')
+      .map(e => e.split('/')[0])
+  )]
+
+  if (isFlat) {
+    // Wrap into a named subdir: extract to a temp dir, then move
+    const rawName = uploadedFilename.replace(/\.(skill|zip)$/i, '') || 'imported-skill'
+    const skillName = sanitizeSkillName(rawName) || 'imported-skill'
+    const skillDir = join(targetDir, skillName)
+    const tmpExtract = join(targetDir, `_tmp_${randomUUID()}`)
+    mkdirSync(tmpExtract, { recursive: true })
+    try {
+      execSync(`unzip -o ${shellEscape(zipPath)} -d ${shellEscape(tmpExtract)}`, { timeout: 10000 })
+      // Symlink defence on tmp dir
+      const rejectSymlinks = (dir: string): boolean => {
+        for (const e of readdirSync(dir)) {
+          const p = join(dir, e)
+          const st = lstatSync(p)
+          if (st.isSymbolicLink()) return true
+          if (st.isDirectory() && rejectSymlinks(p)) return true
+        }
+        return false
+      }
+      if (rejectSymlinks(tmpExtract)) {
+        rmSync(tmpExtract, { recursive: true, force: true })
+        throw Object.assign(new Error('symlink rejected'), { code: 'SYMLINK' })
+      }
+      if (existsSync(skillDir)) rmSync(skillDir, { recursive: true, force: true })
+      execSync(`mv ${shellEscape(tmpExtract)} ${shellEscape(skillDir)}`, { timeout: 5000 })
+      return [skillName]
+    } catch (e: any) {
+      try { rmSync(tmpExtract, { recursive: true, force: true }) } catch { /* ignored */ }
+      throw e
+    }
+  }
+
+  if (nestedDirs.length > 0) {
+    const before = new Set(readdirSync(targetDir))
+    execSync(`unzip -o ${shellEscape(zipPath)} -d ${shellEscape(targetDir)}`, { timeout: 10000 })
+    // Symlink defence on newly extracted dirs
+    const rejectSymlinks = (dir: string): boolean => {
+      for (const e of readdirSync(dir)) {
+        const p = join(dir, e)
+        const st = lstatSync(p)
+        if (st.isSymbolicLink()) return true
+        if (st.isDirectory() && rejectSymlinks(p)) return true
+      }
+      return false
+    }
+    for (const f of readdirSync(targetDir).filter(f => !before.has(f))) {
+      const p = join(targetDir, f)
+      try {
+        if (lstatSync(p).isSymbolicLink() || (statSync(p).isDirectory() && rejectSymlinks(p))) {
+          rmSync(p, { recursive: true, force: true })
+          throw Object.assign(new Error('symlink rejected'), { code: 'SYMLINK' })
+        }
+      } catch (e: any) { if (e.code === 'SYMLINK') throw e }
+    }
+    return nestedDirs.filter(d => existsSync(join(targetDir, d, 'SKILL.md')))
+  }
+
+  throw new Error('No SKILL.md found in archive')
+}
+
 function agentDir(name: string): string {
   return join(AGENTS_BASE_DIR, name)
 }
@@ -306,9 +390,10 @@ function startAgentProcess(name: string): { ok: boolean; pid?: number; error?: s
     const model = readAgentModel(name)
     const isOllama = !model.startsWith('claude-')
     const ollamaEnv = isOllama ? `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && ` : ''
-    // bun lives under ~/.bun/bin, which isn't in the dashboard's launchd PATH.
-    // The Claude plugin launcher spawns `bun`, so we must prepend it here.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && export TELEGRAM_STATE_DIR="${tgStateDir}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} --dangerously-skip-permissions --model ${model} --channels plugin:telegram@claude-plugins-official`
+    const bunBin = join(homedir(), '.bun', 'bin')
+    const basePath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'
+    const fullPath = basePath.includes(bunBin) ? basePath : `${bunBin}:${basePath}`
+    const cmd = `export TELEGRAM_STATE_DIR="${tgStateDir}" && export PATH="${fullPath}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} --dangerously-skip-permissions --model ${model} --channels plugin:telegram@claude-plugins-official`
     execSync(
       `${TMUX} new-session -d -s ${session} "${cmd}"`,
       { timeout: 10000 }
@@ -1411,50 +1496,14 @@ export function startWebServer(port = 3420): http.Server {
         const tmpPath = join(skillsDir, `_import_${randomUUID()}.zip`)
         try {
           writeFileSync(tmpPath, file.data)
-          // Reject entries with absolute paths or parent-dir escapes before extraction.
-          const listOutput = execSync(`unzip -Z1 "${tmpPath}" 2>&1`, { timeout: 5000, encoding: 'utf-8' })
-          const entries = listOutput.split('\n').map((l) => l.trim()).filter(Boolean)
-          const before = new Set(readdirSync(skillsDir))
-          for (const entry of entries) {
-            if (entry.includes('..') || entry.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(entry)) {
-              unlinkSync(tmpPath)
-              return json(res, { error: 'Invalid skill file: path traversal detected' }, 400)
-            }
-          }
-          execSync(`unzip -o "${tmpPath}" -d "${skillsDir}"`, { timeout: 10000 })
+          const extracted = extractSkillZip(tmpPath, skillsDir, file.name)
           unlinkSync(tmpPath)
-
-          // Defence-in-depth: walk what was just extracted and delete any symlink entries.
-          const after = readdirSync(skillsDir).filter((f) => !before.has(f))
-          const rejectSymlinks = (dir: string): boolean => {
-            for (const entry of readdirSync(dir)) {
-              const p = join(dir, entry)
-              const st = lstatSync(p)
-              if (st.isSymbolicLink()) return true
-              if (st.isDirectory() && rejectSymlinks(p)) return true
-            }
-            return false
-          }
-          for (const f of after) {
-            const p = join(skillsDir, f)
-            try {
-              if (lstatSync(p).isSymbolicLink() || (statSync(p).isDirectory() && rejectSymlinks(p))) {
-                rmSync(p, { recursive: true, force: true })
-                return json(res, { error: 'Invalid skill file: symlink entries rejected' }, 400)
-              }
-            } catch { /* ignored */ }
-          }
-
-          // Find the extracted skill name (directory containing SKILL.md)
-          const extracted = readdirSync(skillsDir).filter(f => {
-            const p = join(skillsDir, f)
-            try { return statSync(p).isDirectory() && existsSync(join(p, 'SKILL.md')) } catch { return false }
-          })
-
           logger.info({ name, skills: extracted }, 'Skill(s) imported')
           return json(res, { ok: true, imported: extracted })
-        } catch (err) {
+        } catch (err: any) {
           try { unlinkSync(tmpPath) } catch { /* ignored */ }
+          if (err.code === 'PATH_TRAVERSAL') return json(res, { error: 'Invalid skill file: path traversal detected' }, 400)
+          if (err.code === 'SYMLINK') return json(res, { error: 'Invalid skill file: symlink entries rejected' }, 400)
           logger.error({ err }, 'Failed to import skill')
           return json(res, { error: 'Failed to extract .skill file' }, 500)
         }
@@ -2746,6 +2795,32 @@ Respond ONLY with JSON, nothing else:
         }
 
         return json(res, skills)
+      }
+
+      // POST /api/skills/import - Import .skill file into global skills dir
+      if (path === '/api/skills/import' && method === 'POST') {
+        const GLOBAL_SKILLS_DIR = join(homedir(), '.claude', 'skills')
+        mkdirSync(GLOBAL_SKILLS_DIR, { recursive: true })
+
+        const body = await readBody(req)
+        const contentType = req.headers['content-type'] || ''
+        const { file } = parseMultipart(body, contentType)
+        if (!file) return json(res, { error: 'No file uploaded' }, 400)
+
+        const tmpPath = join(GLOBAL_SKILLS_DIR, `_import_${randomUUID()}.zip`)
+        try {
+          writeFileSync(tmpPath, file.data)
+          const extracted = extractSkillZip(tmpPath, GLOBAL_SKILLS_DIR, file.name)
+          unlinkSync(tmpPath)
+          logger.info({ skills: extracted }, 'Global skill(s) imported')
+          return json(res, { ok: true, imported: extracted })
+        } catch (err: any) {
+          try { unlinkSync(tmpPath) } catch { /* ignored */ }
+          if (err.code === 'PATH_TRAVERSAL') return json(res, { error: 'Invalid skill file: path traversal detected' }, 400)
+          if (err.code === 'SYMLINK') return json(res, { error: 'Invalid skill file: symlink entries rejected' }, 400)
+          logger.error({ err }, 'Failed to import global skill')
+          return json(res, { error: 'Failed to extract .skill file' }, 500)
+        }
       }
 
       // GET /api/skills/:name - Get detailed skill info
