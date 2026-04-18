@@ -956,7 +956,7 @@ function hasTelegramPluginAlive(claudePid: number): boolean {
       if (seen.has(p)) continue
       seen.add(p)
       const cmd = cmdOf.get(p) || ''
-      if (cmd.includes('bun') && cmd.includes('server.ts') && cmd.includes('telegram')) return true
+      if (cmd.includes('bun') && (cmd.includes('server.ts') || cmd.includes('telegram'))) return true
       for (const k of (childrenOf.get(p) || [])) stack.push(k)
     }
     return false
@@ -1952,7 +1952,16 @@ Rovid leiras: "${finalPrompt}"`
       // === Memories API ===
       if (path === '/api/memories' && method === 'POST') {
         const body = await readBody(req)
-        const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string }
+        let data: { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string }
+        try {
+          data = JSON.parse(body.toString())
+        } catch {
+          // Agents sometimes send literal newlines/tabs in JSON strings -- sanitize and retry
+          const sanitized = body.toString().replace(/[\x00-\x1F\x7F]/g, (c) =>
+            ({ '\n': '\\n', '\r': '\\r', '\t': '\\t' } as Record<string, string>)[c] ?? ' '
+          )
+          data = JSON.parse(sanitized)
+        }
         if (!data.content?.trim()) return json(res, { error: 'Content is required' }, 400)
         const tier = data.tier || data.category || 'warm'
         const result = saveAgentMemory(
