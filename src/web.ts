@@ -912,9 +912,12 @@ const agentDownSince: Map<string, number> = new Map()
 const PLUGIN_ALERT_DEDUP_MS = 30 * 60 * 1000
 const MARVEEN_CHANNELS_PLIST = join(homedir(), 'Library', 'LaunchAgents', 'com.marveen.channels.plist')
 
-// Marveen recovery is a 3-stage escalator because killing the session
+// Marveen recovery is a 4-stage escalator because killing the session
 // terminates the live Marveen conversation, so we try cheap fixes first.
-type MarveenRecoveryStage = 'soft' | 'hard' | 'gave_up'
+// The "save" stage gives Marveen one tick to persist hot/warm memory to
+// SQLite before we pull the rug, so the next session wakes up with the
+// last-moment context from the dying one.
+type MarveenRecoveryStage = 'soft' | 'save' | 'hard' | 'gave_up'
 interface MarveenDownState {
   downSince: number
   stage: MarveenRecoveryStage
@@ -951,6 +954,27 @@ function softReconnectMarveen(): void {
   }
 }
 
+function triggerMarveenMemorySave(): void {
+  // Nudge Marveen to persist whatever hot/warm state is still in context
+  // before the hard restart pulls the session. Uses sendPromptToSession
+  // so the long prompt isn't buffered as a [Pasted text] and actually
+  // reaches the agent as an input turn.
+  const prompt = [
+    '[SYSTEM: channels recovery] A Telegram plugin nem reagál, kb 60 másodperc',
+    'múlva hard restart lesz a marveen-channels session-ön (a beszélgetés elvész).',
+    'MOST mentsd el a ClaudeClaw memóriába amit a következő sessionnek tudnia kell:',
+    'aktív feladatok (tier hot), friss döntések/preferenciák (warm), tanulságok (cold).',
+    'Használd: curl -s -X POST http://localhost:3420/api/memories ... (lásd CLAUDE.md).',
+    'Ha kész vagy, írj egy rövid napi napló bejegyzést is a /api/daily-log-ra. Utána elég.',
+  ].join(' ')
+  try {
+    sendPromptToSession('marveen-channels', prompt)
+    logger.info('Marveen memory-save prompt dispatched before hard restart')
+  } catch (err) {
+    logger.warn({ err }, 'Failed to dispatch marveen memory-save prompt')
+  }
+}
+
 export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   try {
     execFileSync('/bin/launchctl', ['unload', MARVEEN_CHANNELS_PLIST], { timeout: 5000 })
@@ -975,11 +999,20 @@ function handleMarveenDown(): void {
     return
   }
   if (marveenDownState.stage === 'soft') {
-    // Soft didn't help; escalate to hard restart.
+    // Soft didn't help; ask Marveen to persist memory before we pull the plug.
+    marveenDownState.stage = 'save'
+    marveenDownState.lastAlertAt = now
+    logger.warn('Marveen Telegram plugin still down -- stage 2 (memory save)')
+    sendMarveenAlert('⚠️ /mcp nem segített. Szólok Marveennek hogy mentsen memóriát hard restart előtt (~60s türelmi idő).').catch(() => {})
+    triggerMarveenMemorySave()
+    return
+  }
+  if (marveenDownState.stage === 'save') {
+    // Save window elapsed; hard restart now.
     marveenDownState.stage = 'hard'
     marveenDownState.lastAlertAt = now
-    logger.warn('Marveen Telegram plugin still down -- stage 2 (hard restart)')
-    sendMarveenAlert('⚠️ /mcp reconnect nem segített. Hard restart a marveen-channels session-ön (a live conversation elveszik, memória megmarad).').catch(() => {})
+    logger.warn('Marveen Telegram plugin still down -- stage 3 (hard restart)')
+    sendMarveenAlert('⚠️ Memória mentés türelmi idő lejárt. Hard restart most a marveen-channels session-ön (új session a SQLite memóriával indul).').catch(() => {})
     hardRestartMarveenChannels()
     return
   }
@@ -1003,9 +1036,10 @@ function handleMarveenUp(): void {
     const downedFor = Math.round((Date.now() - marveenDownState.downSince) / 1000)
     const stage = marveenDownState.stage
     logger.info({ stage, downedFor }, 'Marveen Telegram plugin recovered')
-    if (stage !== 'soft') {
-      // Only alert on recovery if we actually escalated -- otherwise it's
-      // just a transient blip and a "recovered" message would be noise.
+    if (stage !== 'soft' && stage !== 'save') {
+      // Only alert on recovery if we actually pulled the session -- the soft
+      // and save stages don't destroy state, so a "recovered" message there
+      // would just be noise.
       sendMarveenAlert(`✅ Marveen Telegram plugin helyreállt (${stage} után, ${downedFor}s kiesés).`).catch(() => {})
     }
     marveenDownState = null
