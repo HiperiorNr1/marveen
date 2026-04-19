@@ -88,6 +88,7 @@ function checkBearerToken(header: string | undefined, expected: string): boolean
 
 interface AgentSummary {
   name: string
+  displayName: string
   description: string
   model: string
   hasTelegram: boolean
@@ -108,7 +109,12 @@ interface AgentDetail extends AgentSummary {
 
 
 function sanitizeAgentName(raw: string): string {
+  // NFD + combining-mark strip so Hungarian input like "étrendíró" decays
+  // to "etrendiro" instead of silently losing every accented character
+  // and producing "trendr".
   return raw.trim().toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9-]/g, '')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
@@ -273,6 +279,25 @@ function writeAgentModel(name: string, model: string): void {
   writeFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
+function readAgentDisplayName(name: string): string {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    const raw = typeof config.displayName === 'string' ? config.displayName.trim() : ''
+    if (raw) return raw
+  } catch { /* fall through */ }
+  // Fall back to a title-cased version of the sanitized name.
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
+function writeAgentDisplayName(name: string, displayName: string): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
+  config.displayName = displayName
+  writeFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
 function readAgentTelegramConfig(name: string): { hasTelegram: boolean; botUsername?: string } {
   const envPath = join(agentDir(name), '.claude', 'channels', 'telegram', '.env')
   if (!existsSync(envPath)) return { hasTelegram: false }
@@ -281,6 +306,37 @@ function readAgentTelegramConfig(name: string): { hasTelegram: boolean; botUsern
   if (!tokenMatch || !tokenMatch[1].trim()) return { hasTelegram: false }
   // We don't call the API here to keep listing fast; username comes from test endpoint
   return { hasTelegram: true }
+}
+
+// Marveen's Telegram channel lives under the global ~/.claude path, not
+// under agents/marveen, because the main agent reuses the system Claude
+// Code channel install. Read it the same way the plugin does.
+function readMarveenTelegramConfig(): { hasTelegram: boolean; botUsername?: string } {
+  const envPath = join(homedir(), '.claude', 'channels', 'telegram', '.env')
+  if (!existsSync(envPath)) return { hasTelegram: false }
+  const content = readFileOr(envPath, '')
+  const tokenMatch = content.match(/TELEGRAM_BOT_TOKEN=(.+)/)
+  const token = tokenMatch?.[1]?.trim()
+  if (!token) return { hasTelegram: false }
+  return { hasTelegram: true, botUsername: marveenBotUsernameCache.value }
+}
+
+// Bot username changes require a restart anyway, so a long cache is fine.
+const marveenBotUsernameCache: { value?: string; fetchedAt: number } = { fetchedAt: 0 }
+async function refreshMarveenBotUsername(): Promise<void> {
+  const envPath = join(homedir(), '.claude', 'channels', 'telegram', '.env')
+  if (!existsSync(envPath)) return
+  const tokenMatch = readFileOr(envPath, '').match(/TELEGRAM_BOT_TOKEN=(.+)/)
+  const token = tokenMatch?.[1]?.trim()
+  if (!token) return
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/getMe`)
+    const data = await r.json() as { ok?: boolean; result?: { username?: string } }
+    if (data.ok && data.result?.username) {
+      marveenBotUsernameCache.value = `@${data.result.username}`
+      marveenBotUsernameCache.fetchedAt = Date.now()
+    }
+  } catch { /* offline; cache stays stale */ }
 }
 
 function getAgentSummary(name: string): AgentSummary {
@@ -295,6 +351,7 @@ function getAgentSummary(name: string): AgentSummary {
 
   return {
     name,
+    displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
     hasTelegram: tg.hasTelegram,
@@ -464,11 +521,12 @@ Generate a comprehensive CLAUDE.md that includes:
 - Clear role and responsibilities based on the description above
 - Behavioral guidelines
 - Communication style
-- Language rules (Hungarian with Szabolcs, English for code/technical)
+- Language rules (Hungarian with ${OWNER_NAME}, English for code/technical)
 - Tool usage guidelines relevant to the agent's role
 - Any domain-specific instructions
 
-The owner is Szabolcs (Szota Szabolcs), an AI consultant from Budapest.
+The owner's name is ${OWNER_NAME}. Use this exact name everywhere the CLAUDE.md
+refers to the owner/user. Do not substitute or invent any other name.
 
 IMPORTANT FORMATTING RULES:
 - Write ALL Hungarian text with proper accents (á, é, í, ó, ö, ő, ú, ü, ű). NEVER write Hungarian without accents.
@@ -528,7 +586,7 @@ Description: ${description}
 Generate a personality definition that includes:
 - Core personality traits
 - Communication tone and style
-- How it addresses the user (Szabolcs)
+- How it addresses the user (whose name is ${OWNER_NAME} -- use this name, not any other)
 - Unique quirks or characteristics
 - What it should avoid
 
@@ -563,10 +621,10 @@ Generate a SKILL.md with this structure:
    - ## Instructions - step-by-step guide for Claude
    - ## Output format - what the output should look like
    - ## Examples - 1-2 concrete examples with Input/Output
-   - ## Language rules - Hungarian with Szabolcs (the user), English for code/technical
+   - ## Language rules - Hungarian with ${OWNER_NAME} (the user), English for code/technical
    - ## What to avoid - common pitfalls
 
-Keep the body under 200 lines. Be specific and actionable. The owner is Szabolcs (Szota Szabolcs), an AI consultant from Budapest.
+Keep the body under 200 lines. Be specific and actionable. The owner's name is ${OWNER_NAME}; use only this name when referring to the user.
 Output ONLY the markdown content, no code fences.`
 
   const { text } = await runAgent(prompt)
@@ -907,14 +965,12 @@ function startMessageRouter(): NodeJS.Timeout {
 }
 
 // --- Telegram Plugin Health Monitor ---
-// The Claude Code <-> telegram MCP channel can drop silently:
-//   * the bun server.ts grandchild can die (process loss), or
-//   * the MCP transport on the Claude side can stall while bun is alive.
-// In either case the Telegram bot stops responding. For non-Marveen agents
-// we can recover by killing+respawning the tmux session through the
-// existing dashboard helpers. For Marveen we must alert the operator
-// instead, because the marveen-channels session hosts the running Marveen
-// process itself (suicide-by-restart would lose the live conversation).
+// Detect when the bun server.ts grandchild dies under a Claude session
+// by walking the process tree. (We deliberately don't pane-scan for
+// "Failed to reconnect" strings -- those persist in scrollback and fire
+// false positives, e.g. if the source containing the regex is shown.)
+// Agents recover via stop+start; for marveen-channels we can only alert,
+// because killing it would terminate the live Marveen session.
 
 function getClaudePidForSession(session: string): number | null {
   try {
@@ -956,7 +1012,10 @@ function hasTelegramPluginAlive(claudePid: number): boolean {
       if (seen.has(p)) continue
       seen.add(p)
       const cmd = cmdOf.get(p) || ''
-      if (cmd.includes('bun') && (cmd.includes('server.ts') || cmd.includes('telegram'))) return true
+      // The plugin runs as `bun run --cwd .../telegram/...` with a `bun server.ts`
+      // grandchild. Either hit is proof the plugin is up.
+      if (cmd.includes('/telegram/') && cmd.includes('bun')) return true
+      if (/\bbun\b/.test(cmd) && cmd.includes('server.ts')) return true
       for (const k of (childrenOf.get(p) || [])) stack.push(k)
     }
     return false
@@ -965,32 +1024,141 @@ function hasTelegramPluginAlive(claudePid: number): boolean {
   }
 }
 
-function paneShowsTelegramFailure(session: string): boolean {
-  try {
-    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p', '-S', '-100'], { timeout: 3000, encoding: 'utf-8' })
-    return /plugin:telegram:telegram\s*·\s*✘\s*failed|Failed to reconnect to plugin:telegram:telegram/.test(pane)
-  } catch {
-    return false
-  }
-}
-
-const pluginDownSince: Map<string, number> = new Map()
+const agentDownSince: Map<string, number> = new Map()
 const PLUGIN_ALERT_DEDUP_MS = 30 * 60 * 1000
+const MARVEEN_CHANNELS_PLIST = join(homedir(), 'Library', 'LaunchAgents', 'com.marveen.channels.plist')
 
-async function alertMarveenPluginDown(reason: string): Promise<void> {
+// Marveen recovery is a 4-stage escalator because killing the session
+// terminates the live Marveen conversation, so we try cheap fixes first.
+// The "save" stage gives Marveen one tick to persist hot/warm memory to
+// SQLite before we pull the rug, so the next session wakes up with the
+// last-moment context from the dying one.
+type MarveenRecoveryStage = 'soft' | 'save' | 'hard' | 'gave_up'
+interface MarveenDownState {
+  downSince: number
+  stage: MarveenRecoveryStage
+  lastAlertAt: number
+}
+let marveenDownState: MarveenDownState | null = null
+
+async function sendMarveenAlert(text: string): Promise<void> {
   try {
     const envPath = join(PROJECT_ROOT, '.env')
     const envContent = readFileOr(envPath, '')
     const tokenMatch = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)
     const token = tokenMatch?.[1]?.trim()
     if (!token) return
-    await sendTelegramMessage(
-      token,
-      ALLOWED_CHAT_ID,
-      `⚠️ Marveen Telegram plugin lecsatlakozott (${reason}). Magamat nem tudom restartolni -- nyomj /mcp-t a marveen-channels session-ben hogy reconnect-eljen.`,
-    )
+    await sendTelegramMessage(token, ALLOWED_CHAT_ID, text)
   } catch (err) {
-    logger.warn({ err }, 'Failed to send marveen plugin-down alert')
+    logger.warn({ err }, 'Failed to send marveen plugin alert')
+  }
+}
+
+function softReconnectMarveen(): void {
+  // /mcp opens Claude Code's MCP status dialog; a follow-up Enter picks
+  // the first action (Reconnect if the plugin is disconnected). We send
+  // Escape first in case a different dialog is already open.
+  try {
+    execFileSync(TMUX, ['send-keys', '-t', 'marveen-channels', 'Escape'], { timeout: 3000 })
+    execFileSync('/bin/sleep', ['0.2'], { timeout: 1000 })
+    execFileSync(TMUX, ['send-keys', '-t', 'marveen-channels', '/mcp', 'Enter'], { timeout: 3000 })
+    execFileSync('/bin/sleep', ['0.3'], { timeout: 1000 })
+    execFileSync(TMUX, ['send-keys', '-t', 'marveen-channels', 'Enter'], { timeout: 3000 })
+    logger.info('Marveen soft reconnect: sent /mcp + Enter')
+  } catch (err) {
+    logger.warn({ err }, 'Marveen soft reconnect failed')
+  }
+}
+
+function triggerMarveenMemorySave(): void {
+  // Nudge Marveen to persist whatever hot/warm state is still in context
+  // before the hard restart pulls the session. Uses sendPromptToSession
+  // so the long prompt isn't buffered as a [Pasted text] and actually
+  // reaches the agent as an input turn.
+  const prompt = [
+    '[SYSTEM: channels recovery] A Telegram plugin nem reagál, kb 60 másodperc',
+    'múlva hard restart lesz a marveen-channels session-ön (a beszélgetés elvész).',
+    'MOST mentsd el a ClaudeClaw memóriába amit a következő sessionnek tudnia kell:',
+    'aktív feladatok (tier hot), friss döntések/preferenciák (warm), tanulságok (cold).',
+    'Használd: curl -s -X POST http://localhost:3420/api/memories ... (lásd CLAUDE.md).',
+    'Ha kész vagy, írj egy rövid napi napló bejegyzést is a /api/daily-log-ra. Utána elég.',
+  ].join(' ')
+  try {
+    sendPromptToSession('marveen-channels', prompt)
+    logger.info('Marveen memory-save prompt dispatched before hard restart')
+  } catch (err) {
+    logger.warn({ err }, 'Failed to dispatch marveen memory-save prompt')
+  }
+}
+
+export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
+  try {
+    execFileSync('/bin/launchctl', ['unload', MARVEEN_CHANNELS_PLIST], { timeout: 5000 })
+    execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
+    execFileSync('/bin/launchctl', ['load', MARVEEN_CHANNELS_PLIST], { timeout: 5000 })
+    logger.warn('Marveen hard restart: launchctl reload of com.marveen.channels')
+    return { ok: true }
+  } catch (err) {
+    logger.error({ err }, 'Marveen hard restart failed')
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function handleMarveenDown(): void {
+  const now = Date.now()
+  if (!marveenDownState) {
+    // First tick of this outage: log, alert, try the soft fix.
+    marveenDownState = { downSince: now, stage: 'soft', lastAlertAt: now }
+    logger.warn('Marveen Telegram plugin down -- stage 1 (soft /mcp reconnect)')
+    sendMarveenAlert('⚠️ Marveen Telegram plugin lecsatlakozott. Próbálok /mcp-vel reconnectálni...').catch(() => {})
+    softReconnectMarveen()
+    return
+  }
+  if (marveenDownState.stage === 'soft') {
+    // Soft didn't help; ask Marveen to persist memory before we pull the plug.
+    marveenDownState.stage = 'save'
+    marveenDownState.lastAlertAt = now
+    logger.warn('Marveen Telegram plugin still down -- stage 2 (memory save)')
+    sendMarveenAlert('⚠️ /mcp nem segített. Szólok Marveennek hogy mentsen memóriát hard restart előtt (~60s türelmi idő).').catch(() => {})
+    triggerMarveenMemorySave()
+    return
+  }
+  if (marveenDownState.stage === 'save') {
+    // Save window elapsed; hard restart now.
+    marveenDownState.stage = 'hard'
+    marveenDownState.lastAlertAt = now
+    logger.warn('Marveen Telegram plugin still down -- stage 3 (hard restart)')
+    sendMarveenAlert('⚠️ Memória mentés türelmi idő lejárt. Hard restart most a marveen-channels session-ön (új session a SQLite memóriával indul).').catch(() => {})
+    hardRestartMarveenChannels()
+    return
+  }
+  if (marveenDownState.stage === 'hard') {
+    // Hard didn't help either; give up, keep alerting.
+    marveenDownState.stage = 'gave_up'
+    marveenDownState.lastAlertAt = now
+    logger.error('Marveen Telegram plugin still down after hard restart -- giving up auto-recovery')
+    sendMarveenAlert('🚨 Hard restart SEM segített. Kézzel kell megnézni: `tmux attach -t marveen-channels` és `launchctl list | grep marveen`.').catch(() => {})
+    return
+  }
+  // gave_up -- re-alert at most every PLUGIN_ALERT_DEDUP_MS.
+  if (now - marveenDownState.lastAlertAt > PLUGIN_ALERT_DEDUP_MS) {
+    marveenDownState.lastAlertAt = now
+    sendMarveenAlert('🚨 Marveen Telegram plugin még mindig halott. Nézd meg kézzel.').catch(() => {})
+  }
+}
+
+function handleMarveenUp(): void {
+  if (marveenDownState) {
+    const downedFor = Math.round((Date.now() - marveenDownState.downSince) / 1000)
+    const stage = marveenDownState.stage
+    logger.info({ stage, downedFor }, 'Marveen Telegram plugin recovered')
+    if (stage !== 'soft' && stage !== 'save') {
+      // Only alert on recovery if we actually pulled the session -- the soft
+      // and save stages don't destroy state, so a "recovered" message there
+      // would just be noise.
+      sendMarveenAlert(`✅ Marveen Telegram plugin helyreállt (${stage} után, ${downedFor}s kiesés).`).catch(() => {})
+    }
+    marveenDownState = null
   }
 }
 
@@ -1003,34 +1171,30 @@ function startTelegramPluginMonitor(): NodeJS.Timeout {
     }
     for (const t of targets) {
       const claudePid = getClaudePidForSession(t.session)
-      if (!claudePid) continue
+      if (!claudePid) {
+        if (t.isMarveen) handleMarveenDown()
+        continue
+      }
       const alive = hasTelegramPluginAlive(claudePid)
-      const failedMsg = paneShowsTelegramFailure(t.session)
-      const down = !alive || failedMsg
-      if (!down) {
-        if (pluginDownSince.has(t.session)) {
-          logger.info({ session: t.session }, 'Telegram plugin recovered')
-          pluginDownSince.delete(t.session)
+      if (alive) {
+        if (t.isMarveen) {
+          handleMarveenUp()
+        } else if (agentDownSince.has(t.session)) {
+          logger.info({ session: t.session }, 'Agent Telegram plugin recovered')
+          agentDownSince.delete(t.session)
         }
         continue
       }
-      const since = pluginDownSince.get(t.session)
-      const isFirst = since === undefined
-      if (isFirst) pluginDownSince.set(t.session, Date.now())
-      const reason = !alive ? 'bun server.ts process eltunt' : 'pane: Failed to reconnect'
       if (t.isMarveen) {
-        if (isFirst || (since !== undefined && Date.now() - since > PLUGIN_ALERT_DEDUP_MS)) {
-          logger.warn({ session: t.session, alive, failedMsg }, 'Marveen Telegram plugin down -- alerting')
-          alertMarveenPluginDown(reason).catch(() => {})
-          pluginDownSince.set(t.session, Date.now())
-        }
+        handleMarveenDown()
       } else {
-        logger.warn({ agent: t.agentName, alive, failedMsg }, 'Agent Telegram plugin down -- auto-restarting')
+        if (!agentDownSince.has(t.session)) agentDownSince.set(t.session, Date.now())
+        logger.warn({ agent: t.agentName }, 'Agent Telegram plugin down -- auto-restarting')
         try {
           stopAgentProcess(t.agentName!)
           execSync('sleep 2', { timeout: 4000 })
           startAgentProcess(t.agentName!)
-          pluginDownSince.delete(t.session)
+          agentDownSince.delete(t.session)
         } catch (err) {
           logger.error({ err, agent: t.agentName }, 'Failed to auto-restart agent after telegram plugin down')
         }
@@ -1241,7 +1405,8 @@ export function startWebServer(port = 3420): http.Server {
         const body = await readBody(req)
         const data = JSON.parse(body.toString())
         const { description, model: rawModel } = data as { name: string; description: string; model?: string }
-        const name = sanitizeAgentName(data.name || '')
+        const rawName = typeof data.name === 'string' ? data.name.trim() : ''
+        const name = sanitizeAgentName(rawName)
         const model = resolveModelId(rawModel || DEFAULT_MODEL)
 
         if (!name) return json(res, { error: 'Name is required' }, 400)
@@ -1250,6 +1415,9 @@ export function startWebServer(port = 3420): http.Server {
 
         scaffoldAgentDir(name)
         writeAgentModel(name, model)
+        // Preserve the original (accented, cased) name for UI display; the
+        // sanitized form stays the filesystem/API identifier.
+        if (rawName && rawName !== name) writeAgentDisplayName(name, rawName)
 
         logger.info({ name, description }, 'Generating agent CLAUDE.md and SOUL.md...')
         try {
@@ -1356,9 +1524,12 @@ export function startWebServer(port = 3420): http.Server {
         const tgDir = join(agentDir(name), '.claude', 'channels', 'telegram')
         mkdirSync(tgDir, { recursive: true })
         writeFileSync(join(tgDir, '.env'), `TELEGRAM_BOT_TOKEN=${botToken.trim()}\n`, { mode: 0o600 })
+        // pairing mode lets the first unknown sender trigger a 6-digit code
+        // exchange. allowlist mode silently drops anything outside allowFrom,
+        // which left new sub-agents impossible to pair with over Telegram.
         writeFileSync(join(tgDir, 'access.json'), JSON.stringify({
-          dmPolicy: 'allowlist',
-          allowFrom: [ALLOWED_CHAT_ID],
+          dmPolicy: 'pairing',
+          allowFrom: [],
           groups: {},
           pending: {},
         }, null, 2))
@@ -1381,12 +1552,18 @@ export function startWebServer(port = 3420): http.Server {
         return json(res, { ok: true })
       }
 
-      // GET /api/agents/:name/telegram/pending - List pending pairing codes
+      // GET /api/agents/:name/telegram/pending - List pending pairing codes.
+      // Marveen is special-cased to read from the global ~/.claude/channels
+      // path, which is where her plugin actually stores access state.
       const tgPendingMatch = path.match(/^\/api\/agents\/([^/]+)\/telegram\/pending$/)
       if (tgPendingMatch && method === 'GET') {
         const name = decodeURIComponent(tgPendingMatch[1])
-        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
-        const accessPath = join(agentDir(name), '.claude', 'channels', 'telegram', 'access.json')
+        const accessPath = name === 'marveen'
+          ? join(homedir(), '.claude', 'channels', 'telegram', 'access.json')
+          : join(agentDir(name), '.claude', 'channels', 'telegram', 'access.json')
+        if (name !== 'marveen' && !existsSync(agentDir(name))) {
+          return json(res, { error: 'Agent not found' }, 404)
+        }
         const accessContent = readFileOr(accessPath, '{}')
         try {
           const access = JSON.parse(accessContent)
@@ -1408,13 +1585,17 @@ export function startWebServer(port = 3420): http.Server {
       const tgApproveMatch = path.match(/^\/api\/agents\/([^/]+)\/telegram\/approve$/)
       if (tgApproveMatch && method === 'POST') {
         const name = decodeURIComponent(tgApproveMatch[1])
-        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
+        if (name !== 'marveen' && !existsSync(agentDir(name))) {
+          return json(res, { error: 'Agent not found' }, 404)
+        }
 
         const body = await readBody(req)
         const { code } = JSON.parse(body.toString()) as { code: string }
         if (!code?.trim()) return json(res, { error: 'Code is required' }, 400)
 
-        const tgDir = join(agentDir(name), '.claude', 'channels', 'telegram')
+        const tgDir = name === 'marveen'
+          ? join(homedir(), '.claude', 'channels', 'telegram')
+          : join(agentDir(name), '.claude', 'channels', 'telegram')
         const accessPath = join(tgDir, 'access.json')
         const accessContent = readFileOr(accessPath, '{}')
 
@@ -2177,6 +2358,8 @@ Respond ONLY with JSON, nothing else:
       // === Marveen (self) API ===
       if (path === '/api/marveen' && method === 'GET') {
         const claudeMd = readFileOr(join(PROJECT_ROOT, 'CLAUDE.md'), '')
+        const soulMd = readFileOr(join(PROJECT_ROOT, 'SOUL.md'), '')
+        const mcpJson = readFileOr(join(PROJECT_ROOT, '.mcp.json'), '')
         const soulSection = claudeMd.match(/## Személyiség\n\n([\s\S]*?)(?=\n## )/)?.[1]?.trim()
           || claudeMd.match(/## Szemelyiseg\n\n([\s\S]*?)(?=\n## )/)?.[1]?.trim()
           || ''
@@ -2184,22 +2367,40 @@ Respond ONLY with JSON, nothing else:
         const firstLine = claudeMd.match(/^Te .+$/m)?.[0]?.trim() || ''
         const descFromPersonality = soulSection.split('\n').filter(l => l.trim()).slice(0, 2).join(' ').slice(0, 200)
         const description = firstLine || descFromPersonality || `${OWNER_NAME} AI asszisztense`
+        const tg = readMarveenTelegramConfig()
         return json(res, {
           name: BOT_NAME,
           description,
           model: 'claude-opus-4-6',
           running: true,
-          hasTelegram: true,
+          hasTelegram: tg.hasTelegram,
+          telegramBotUsername: tg.botUsername,
           role: 'main',
           personality: soulSection,
+          claudeMd,
+          soulMd,
+          mcpJson,
+          readonly: true,
         })
       }
 
       if (path === '/api/marveen' && method === 'PUT') {
-        const body = await readBody(req)
-        const data = JSON.parse(body.toString()) as { description?: string }
-        // Marveen's description is in CLAUDE.md personality section - for now just return ok
-        // Full CLAUDE.md editing is complex, so we acknowledge the update
+        // Intentionally read-only: Marveen's CLAUDE.md / SOUL.md / .mcp.json
+        // must be edited from the filesystem or via a Telegram request to
+        // Marveen herself, not through the dashboard. A leaked dashboard
+        // token would otherwise allow remote identity rewrite of the live
+        // agent. The frontend hides save buttons for marveen; this stub is
+        // defense-in-depth.
+        return json(res, { ok: true, readonly: true })
+      }
+
+      // POST /api/marveen/restart - Hard-restart the marveen-channels session.
+      // Destructive: the live Marveen conversation terminates; memory persists
+      // in SQLite so the next session resumes with full context. Use when the
+      // Telegram plugin is stuck and you're away from a terminal.
+      if (path === '/api/marveen/restart' && method === 'POST') {
+        const result = hardRestartMarveenChannels()
+        if (!result.ok) return json(res, { error: result.error || 'Restart failed' }, 500)
         return json(res, { ok: true })
       }
 
@@ -2998,6 +3199,10 @@ Respond ONLY with JSON, nothing else:
   // Start Telegram plugin health monitor
   const pluginMonitorInterval = startTelegramPluginMonitor()
   logger.info('Telegram plugin health monitor started (60s poll)')
+
+  // Warm the Marveen bot username cache so /api/marveen returns @username
+  // on the first dashboard load. Re-fetched lazily otherwise.
+  refreshMarveenBotUsername().catch(() => {})
 
   // Cleanup router on server close
   const origClose = server.close.bind(server)

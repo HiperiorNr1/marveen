@@ -452,6 +452,7 @@ let currentAgent = null
 let wizardStep = 1
 let generatedClaudeMd = ''
 let generatedSoulMd = ''
+let wizardCreatedName = ''
 
 // === Modal helpers ===
 function openModal(overlay) {
@@ -515,6 +516,7 @@ function resetWizard() {
   document.querySelectorAll('#avatarGrid .avatar-grid-item').forEach(i => i.classList.remove('selected'))
   generatedClaudeMd = ''
   generatedSoulMd = ''
+  wizardCreatedName = ''
   document.getElementById('wizardClaudeMd').value = ''
   document.getElementById('wizardSoulMd').value = ''
   updateWizardUI()
@@ -564,10 +566,15 @@ document.getElementById('wizardNextBtn').addEventListener('click', async () => {
     }
 
     const result = await res.json()
+    // Backend sanitizes the name (lowercase ASCII, NFD-stripped accents).
+    // Use the sanitized form for every follow-up request so accented input
+    // like "étrendíró" still resolves to the real agent dir "etrendiro".
+    const createdName = result.name || name
+    wizardCreatedName = createdName
     statusEl.textContent = 'SOUL.md generálás...'
 
     // Fetch full agent details to get generated content
-    const detailRes = await fetch(`/api/agents/${encodeURIComponent(name)}`)
+    const detailRes = await fetch(`/api/agents/${encodeURIComponent(createdName)}`)
     if (detailRes.ok) {
       const detail = await detailRes.json()
       generatedClaudeMd = detail.claudeMd || detail.content || ''
@@ -578,7 +585,7 @@ document.getElementById('wizardNextBtn').addEventListener('click', async () => {
 
     // Set gallery avatar if selected
     if (selectedAvatar) {
-      await fetch(`/api/agents/${encodeURIComponent(name)}/avatar`, {
+      await fetch(`/api/agents/${encodeURIComponent(createdName)}/avatar`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ galleryAvatar: selectedAvatar }),
@@ -607,7 +614,9 @@ document.getElementById('wizardBackBtn').addEventListener('click', () => {
 
 // Step 3 -> Create (finalize with edits)
 document.getElementById('wizardCreateBtn').addEventListener('click', async () => {
-  const name = agentName.value.trim()
+  // Use the backend-sanitized name stored in wizardCreatedName, not the raw
+  // input field -- accents in the input would miss the real agent dir.
+  const name = wizardCreatedName || agentName.value.trim()
   const claudeMd = document.getElementById('wizardClaudeMd').value
   const soulMd = document.getElementById('wizardSoulMd').value
   const createBtn = document.getElementById('wizardCreateBtn')
@@ -684,20 +693,38 @@ async function openMarveenDetail() {
   // Process control for Marveen - always running, no start/stop
   document.getElementById('processDot').className = 'process-dot running'
   document.getElementById('processLabel').textContent = 'Fut'
-  document.getElementById('processUptime').textContent = 'tmux: claudeclaw-channels'
+  document.getElementById('processUptime').textContent = 'tmux: marveen-channels'
   document.getElementById('agentStartBtn').hidden = true
   document.getElementById('agentStopBtn').hidden = true
+  // Surface the "channels restart" button -- destructive, but mobile-safe
+  // when the Telegram plugin wedges and you're away from a terminal.
+  document.getElementById('marveenRestartBtn').hidden = false
 
-  // Settings tab - load CLAUDE.md
+  // Settings tab - load real CLAUDE.md / SOUL.md / .mcp.json (read-only).
+  // Editing the main agent's identity files via the dashboard is intentionally
+  // not allowed: a leaked dashboard token would otherwise let a remote user
+  // rewrite the live agent's instructions. Edit via filesystem or by asking
+  // Marveen on Telegram instead.
+  let mFull = m
   try {
     const claudeRes = await fetch('/api/marveen')
     if (claudeRes.ok) {
-      const data = await claudeRes.json()
-      document.getElementById('editClaudeMd').value = `(${displayName} CLAUDE.md szerkesztése a projekt CLAUDE.md fájlban)`
-      document.getElementById('editSoulMd').value = data.personality || ''
-      document.getElementById('editMcpJson').value = ''
+      mFull = await claudeRes.json()
+      document.getElementById('editClaudeMd').value = mFull.claudeMd || ''
+      document.getElementById('editSoulMd').value = mFull.soulMd || ''
+      document.getElementById('editMcpJson').value = mFull.mcpJson || ''
     }
   } catch {}
+  applyMarveenReadonlyMode(true)
+
+  // Telegram tab -- without this the tab stays in the default "not connected"
+  // view even though the bot is running and receiving messages.
+  updateTelegramTab({
+    name: 'marveen',
+    hasTelegram: mFull.hasTelegram !== undefined ? mFull.hasTelegram : true,
+    telegramBotUsername: mFull.telegramBotUsername,
+    running: true,
+  })
 
   // Delete button - hide for Marveen
   document.getElementById('deleteAgentBtn').style.display = 'none'
@@ -705,6 +732,25 @@ async function openMarveenDetail() {
   document.getElementById('detailAvatarGallery').hidden = true
   switchAgentTab('overview')
   openModal(agentDetailOverlay)
+}
+
+function applyMarveenReadonlyMode(readOnly) {
+  const textareaIds = ['editClaudeMd', 'editSoulMd', 'editMcpJson']
+  const saveButtonIds = ['saveClaudeMdBtn', 'saveSoulMdBtn', 'saveMcpJsonBtn', 'saveModelBtn']
+  for (const id of textareaIds) {
+    const el = document.getElementById(id)
+    if (!el) continue
+    if (readOnly) el.setAttribute('readonly', 'readonly')
+    else el.removeAttribute('readonly')
+  }
+  const modelSelect = document.getElementById('editAgentModel')
+  if (modelSelect) modelSelect.disabled = readOnly
+  for (const id of saveButtonIds) {
+    const btn = document.getElementById(id)
+    if (btn) btn.hidden = readOnly
+  }
+  const note = document.getElementById('marveenReadonlyNote')
+  if (note) note.hidden = !readOnly
 }
 
 
@@ -741,13 +787,16 @@ function renderAgents() {
   }
 
   for (const agent of agents) {
+    // agent.name is the sanitized id (API/filesystem); displayName keeps the
+    // original accented/cased input the user typed.
+    const label = agent.displayName || agent.name
     const card = document.createElement('div')
     card.className = 'agent-card'
     card.dataset.name = agent.name
-    const initial = agent.name.charAt(0).toUpperCase()
+    const initial = label.charAt(0).toUpperCase()
     const gradientClass = getAvatarGradient(agent.name)
     const avatarHtml = (agent.hasImage || agent.hasAvatar)
-      ? `<img src="/api/agents/${encodeURIComponent(agent.name)}/avatar?t=${Date.now()}" alt="${escapeHtml(agent.name)}">`
+      ? `<img src="/api/agents/${encodeURIComponent(agent.name)}/avatar?t=${Date.now()}" alt="${escapeHtml(label)}">`
       : initial
 
     const modelClass = agent.model && agent.model !== 'inherit' ? agent.model : ''
@@ -763,7 +812,7 @@ function renderAgents() {
       <div class="agent-card-top">
         <div class="agent-avatar ${gradientClass}">${avatarHtml}</div>
         <div class="agent-card-info">
-          <div class="agent-name">${escapeHtml(agent.name)}</div>
+          <div class="agent-name">${escapeHtml(label)}</div>
           <div class="agent-desc">${escapeHtml(agent.description || '')}</div>
         </div>
       </div>
@@ -789,18 +838,20 @@ async function openAgentDetail(agentName) {
     return
   }
 
+  const detailLabel = currentAgent.displayName || currentAgent.name
+
   // Title
-  document.getElementById('agentDetailTitle').textContent = currentAgent.name
+  document.getElementById('agentDetailTitle').textContent = detailLabel
 
   // Overview tab
-  const initial = currentAgent.name.charAt(0).toUpperCase()
+  const initial = detailLabel.charAt(0).toUpperCase()
   const gradientClass = getAvatarGradient(currentAgent.name)
   const avatar = document.getElementById('agentDetailAvatar')
   avatar.className = 'detail-avatar ' + gradientClass
   avatar.innerHTML = (currentAgent.hasImage || currentAgent.hasAvatar)
-    ? `<img src="/api/agents/${encodeURIComponent(currentAgent.name)}/avatar" alt="${escapeHtml(currentAgent.name)}">`
+    ? `<img src="/api/agents/${encodeURIComponent(currentAgent.name)}/avatar" alt="${escapeHtml(detailLabel)}">`
     : initial
-  document.getElementById('agentDetailName').textContent = currentAgent.name
+  document.getElementById('agentDetailName').textContent = detailLabel
   document.getElementById('agentDetailDesc').textContent = currentAgent.description || ''
   document.getElementById('agentDetailModel').textContent = currentAgent.model || 'inherit'
 
@@ -823,6 +874,12 @@ async function openAgentDetail(agentName) {
 
   // Process control
   updateProcessControl(currentAgent)
+
+  // Channels restart button is Marveen-only -- hide on normal agents.
+  document.getElementById('marveenRestartBtn').hidden = true
+
+  // Restore editable Settings (Marveen detail flips this to read-only).
+  applyMarveenReadonlyMode(false)
 
   // Delete button (restore visibility for normal agents)
   document.getElementById('deleteAgentBtn').style.display = ''
@@ -932,6 +989,24 @@ function updateProcessControl(agent) {
     uptime.textContent = ''
   }
 }
+
+document.getElementById('marveenRestartBtn').addEventListener('click', async () => {
+  if (!confirm('Hard restart a marveen-channels session-ön. A folyamatban lévő Marveen beszélgetés elveszik (memória megmarad). Folytatod?')) return
+  const btn = document.getElementById('marveenRestartBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch('/api/marveen/restart', { method: 'POST' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || 'Restart sikertelen')
+    }
+    showToast('Marveen channels újraindítva')
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+  }
+})
 
 document.getElementById('agentStartBtn').addEventListener('click', async () => {
   if (!currentAgent) return
@@ -3492,26 +3567,42 @@ async function openConnectorDetail(connector) {
     document.getElementById('connectorDetailInfo').innerHTML = '<p>Részletek betöltése sikertelen</p>'
   }
 
-  // Agent assignment
+  // Agent assignment. Marveen auto-loads global connectors via the project
+  // .mcp.json, so she shows up as a fixed disabled-checked entry; sub-agents
+  // need explicit assignment because the file gets copied into their dir.
   try {
     const agentsRes = await fetch('/api/schedules/agents')
     const allAgents = await agentsRes.json()
-    const assignableAgents = allAgents.filter(a => a.name !== 'marveen')
+    const mainAgent = allAgents.find(a => a.name === 'marveen')
+    const subAgents = allAgents.filter(a => a.name !== 'marveen')
 
     const listEl = document.getElementById('connectorAgentList')
     listEl.innerHTML = ''
-    if (assignableAgents.length === 0) {
+    if (mainAgent) {
+      const item = document.createElement('div')
+      item.className = 'connector-agent-item connector-agent-auto'
+      item.innerHTML = `
+        <input type="checkbox" checked disabled title="Globálisan elérhető a fő agentnek -- nem kell külön hozzárendelni">
+        <label>${escapeHtml(mainAgent.label || mainAgent.name)} <span class="tag-auto">automatikus</span></label>
+      `
+      listEl.appendChild(item)
+    }
+    for (const agent of subAgents) {
+      const item = document.createElement('div')
+      item.className = 'connector-agent-item'
+      item.innerHTML = `
+        <input type="checkbox" id="assign-${agent.name}" value="${agent.name}">
+        <label for="assign-${agent.name}">${escapeHtml(agent.label || agent.name)}</label>
+      `
+      listEl.appendChild(item)
+    }
+    if (subAgents.length === 0 && !mainAgent) {
       listEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincsenek hozzarendelheto agensek</p>'
-    } else {
-      for (const agent of assignableAgents) {
-        const item = document.createElement('div')
-        item.className = 'connector-agent-item'
-        item.innerHTML = `
-          <input type="checkbox" id="assign-${agent.name}" value="${agent.name}">
-          <label for="assign-${agent.name}">${escapeHtml(agent.label || agent.name)}</label>
-        `
-        listEl.appendChild(item)
-      }
+    } else if (subAgents.length === 0) {
+      const note = document.createElement('p')
+      note.style.cssText = 'color:var(--text-muted);font-size:12px;margin-top:8px'
+      note.textContent = 'Sub-agentekhez hozzárendelés a Csapat oldalon létrehozott új ágens után érhető el.'
+      listEl.appendChild(note)
     }
   } catch {
     document.getElementById('connectorAgentList').innerHTML = ''
@@ -4121,21 +4212,38 @@ async function openSkillDetail(skillName) {
     try {
       const agentsRes = await fetch('/api/schedules/agents')
       const allAgents = await agentsRes.json()
-      const assignableAgents = allAgents.filter(a => a.name !== 'marveen')
+      const mainAgent = allAgents.find(a => a.name === 'marveen')
+      const subAgents = allAgents.filter(a => a.name !== 'marveen')
 
-      if (assignableAgents.length === 0) {
+      // Marveen auto-loads everything from ~/.claude/skills/, so she's
+      // shown as a fixed checked-disabled entry. Sub-agents need explicit
+      // assignment because the skill dir is copied into agents/<n>/.claude/skills/.
+      if (mainAgent) {
+        const item = document.createElement('div')
+        item.className = 'skill-agent-checkbox skill-agent-auto'
+        item.innerHTML = `
+          <input type="checkbox" checked disabled title="Globálisan elérhető a fő agentnek -- nem kell külön hozzárendelni">
+          <label>${escapeHtml(mainAgent.label || mainAgent.name)} <span class="tag-auto">automatikus</span></label>
+        `
+        checkboxesEl.appendChild(item)
+      }
+      for (const agent of subAgents) {
+        const isChecked = detail.agents.includes(agent.name)
+        const item = document.createElement('div')
+        item.className = 'skill-agent-checkbox'
+        item.innerHTML = `
+          <input type="checkbox" id="skill-assign-${agent.name}" value="${agent.name}" ${isChecked ? 'checked' : ''}>
+          <label for="skill-assign-${agent.name}">${escapeHtml(agent.label || agent.name)}</label>
+        `
+        checkboxesEl.appendChild(item)
+      }
+      if (subAgents.length === 0 && !mainAgent) {
         checkboxesEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincsenek hozzarendelheto agensek</p>'
-      } else {
-        for (const agent of assignableAgents) {
-          const isChecked = detail.agents.includes(agent.name)
-          const item = document.createElement('div')
-          item.className = 'skill-agent-checkbox'
-          item.innerHTML = `
-            <input type="checkbox" id="skill-assign-${agent.name}" value="${agent.name}" ${isChecked ? 'checked' : ''}>
-            <label for="skill-assign-${agent.name}">${escapeHtml(agent.label || agent.name)}</label>
-          `
-          checkboxesEl.appendChild(item)
-        }
+      } else if (subAgents.length === 0) {
+        const note = document.createElement('p')
+        note.style.cssText = 'color:var(--text-muted);font-size:12px;margin-top:8px'
+        note.textContent = 'Sub-agenteknek hozzárendelés a Csapat oldalon létrehozott új ágens után érhető el.'
+        checkboxesEl.appendChild(note)
       }
     } catch {
       checkboxesEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Agensek betoltese sikertelen</p>'
