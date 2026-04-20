@@ -507,6 +507,36 @@ function populateAvatarGrid() {
 }
 
 // === Wizard logic ===
+let cachedProfiles = null
+async function loadProfiles() {
+  if (cachedProfiles) return cachedProfiles
+  try {
+    const res = await fetch('/api/profiles')
+    if (res.ok) cachedProfiles = await res.json()
+  } catch {}
+  return cachedProfiles || []
+}
+
+function populateProfileSelect(selectEl, descEl, selected) {
+  loadProfiles().then((profiles) => {
+    selectEl.innerHTML = ''
+    for (const p of profiles) {
+      const opt = document.createElement('option')
+      opt.value = p.id
+      const tag = p.permissionMode === 'strict' ? ' (szigorú)' : ''
+      opt.textContent = `${p.label}${tag}`
+      if (p.id === selected) opt.selected = true
+      selectEl.appendChild(opt)
+    }
+    const updateDesc = () => {
+      const p = profiles.find(x => x.id === selectEl.value)
+      descEl.textContent = p ? p.description : ''
+    }
+    selectEl.onchange = updateDesc
+    updateDesc()
+  })
+}
+
 function resetWizard() {
   wizardStep = 1
   agentName.value = ''
@@ -519,6 +549,11 @@ function resetWizard() {
   wizardCreatedName = ''
   document.getElementById('wizardClaudeMd').value = ''
   document.getElementById('wizardSoulMd').value = ''
+  populateProfileSelect(
+    document.getElementById('agentProfile'),
+    document.getElementById('agentProfileDesc'),
+    'default',
+  )
   updateWizardUI()
 }
 
@@ -557,6 +592,7 @@ document.getElementById('wizardNextBtn').addEventListener('click', async () => {
         name,
         description: desc,
         model: agentModel.value,
+        profile: document.getElementById('agentProfile').value,
       }),
     })
 
@@ -862,6 +898,11 @@ async function openAgentDetail(agentName) {
   loadOllamaModels().then(() => {
     document.getElementById('editAgentModel').value = currentAgent.model || 'claude-sonnet-4-6'
   })
+  populateProfileSelect(
+    document.getElementById('editAgentProfile'),
+    document.getElementById('editAgentProfileDesc'),
+    currentAgent.securityProfile || 'default',
+  )
   document.getElementById('editClaudeMd').value = currentAgent.claudeMd || currentAgent.content || ''
   document.getElementById('editSoulMd').value = currentAgent.soulMd || ''
   document.getElementById('editMcpJson').value = currentAgent.mcpJson || ''
@@ -1104,6 +1145,22 @@ document.getElementById('saveModelBtn').addEventListener('click', async () => {
     showToast('Modell mentve (újraindítás szükséges)')
     loadAgents()
   } catch { showToast('Hiba a mentés során') }
+})
+
+document.getElementById('saveProfileBtn').addEventListener('click', async () => {
+  if (!currentAgent || currentAgent.role === 'main') return
+  const profile = document.getElementById('editAgentProfile').value
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/security`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile }),
+    })
+    if (!res.ok) throw new Error()
+    const body = await res.json()
+    showToast(body.requiresRestart ? 'Profil mentve (újraindítás szükséges)' : 'Profil mentve')
+    loadAgents()
+  } catch { showToast('Hiba a profil mentésekor') }
 })
 
 document.getElementById('saveClaudeMdBtn').addEventListener('click', async () => {

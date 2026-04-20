@@ -91,6 +91,7 @@ interface AgentSummary {
   displayName: string
   description: string
   model: string
+  securityProfile: string
   hasTelegram: boolean
   telegramBotUsername?: string
   status: 'configured' | 'draft'
@@ -218,6 +219,99 @@ function writeAgentDisplayName(name: string, displayName: string): void {
   writeFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
+// --- Security profiles ---
+//
+// Each profile is a JSON file under templates/profiles/ with an allow/deny
+// list that Claude Code's native permissions engine understands. Choosing a
+// strict profile also drops --dangerously-skip-permissions, so Claude Code
+// enforces the allow/deny list rather than bypassing it. Channels plugin
+// permission prompts (the Telegram Allow/Deny inline buttons) still fire
+// because they live on a different notification channel.
+
+interface ProfileTemplate {
+  id: string
+  label: string
+  description: string
+  permissionMode: 'strict' | 'permissive'
+  filesystem: { allow: string[]; deny: string[] }
+}
+
+const PROFILES_DIR = join(PROJECT_ROOT, 'templates', 'profiles')
+const HARDCODED_DEFAULT_PROFILE: ProfileTemplate = {
+  id: 'default',
+  label: 'Alapértelmezett',
+  description: 'Permissive fallback.',
+  permissionMode: 'permissive',
+  filesystem: { allow: [], deny: [] },
+}
+
+function listProfileTemplates(): ProfileTemplate[] {
+  if (!existsSync(PROFILES_DIR)) return [HARDCODED_DEFAULT_PROFILE]
+  const out: ProfileTemplate[] = []
+  for (const f of readdirSync(PROFILES_DIR)) {
+    if (!f.endsWith('.json')) continue
+    try {
+      const p = JSON.parse(readFileSync(join(PROFILES_DIR, f), 'utf-8')) as ProfileTemplate
+      if (p.id) out.push(p)
+    } catch { /* skip malformed */ }
+  }
+  return out.length ? out : [HARDCODED_DEFAULT_PROFILE]
+}
+
+function loadProfileTemplate(id: string): ProfileTemplate {
+  const path = join(PROFILES_DIR, `${id}.json`)
+  if (existsSync(path)) {
+    try { return JSON.parse(readFileSync(path, 'utf-8')) as ProfileTemplate } catch { /* fall through */ }
+  }
+  if (id !== 'default') return loadProfileTemplate('default')
+  return HARDCODED_DEFAULT_PROFILE
+}
+
+function readAgentSecurityProfile(name: string): string {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    if (typeof config.securityProfile === 'string' && config.securityProfile.trim()) {
+      return config.securityProfile.trim()
+    }
+  } catch { /* fall through */ }
+  return 'default'
+}
+
+function writeAgentSecurityProfile(name: string, profileId: string): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
+  config.securityProfile = profileId
+  writeFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
+function resolveProfilePlaceholders(value: string, ctx: { HOME: string; AGENT_DIR: string }): string {
+  return value
+    .replace(/\$\{HOME\}/g, ctx.HOME)
+    .replace(/\$\{AGENT_DIR\}/g, ctx.AGENT_DIR)
+    .replace(/\$\{WORKDIR\}/g, ctx.AGENT_DIR)
+}
+
+// Merges the profile's allow/deny entries into agents/<name>/.claude/settings.json,
+// preserving any other keys (hooks, custom flags) the user added by hand.
+function writeAgentSettingsFromProfile(name: string, profile: ProfileTemplate): void {
+  const agentRoot = agentDir(name)
+  const settingsDir = join(agentRoot, '.claude')
+  const settingsPath = join(settingsDir, 'settings.json')
+  mkdirSync(settingsDir, { recursive: true })
+  let existing: Record<string, unknown> = {}
+  if (existsSync(settingsPath)) {
+    try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
+  }
+  const ctx = { HOME: homedir(), AGENT_DIR: agentRoot }
+  existing.permissions = {
+    allow: profile.filesystem.allow.map(p => resolveProfilePlaceholders(p, ctx)),
+    deny: profile.filesystem.deny.map(p => resolveProfilePlaceholders(p, ctx)),
+  }
+  writeFileSync(settingsPath, JSON.stringify(existing, null, 2))
+}
+
 function readAgentTelegramConfig(name: string): { hasTelegram: boolean; botUsername?: string } {
   const envPath = join(agentDir(name), '.claude', 'channels', 'telegram', '.env')
   if (!existsSync(envPath)) return { hasTelegram: false }
@@ -274,6 +368,7 @@ function getAgentSummary(name: string): AgentSummary {
     displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
+    securityProfile: readAgentSecurityProfile(name),
     hasTelegram: tg.hasTelegram,
     telegramBotUsername: tg.botUsername,
     status: hasClaudeMd && hasSoulMd ? 'configured' : 'draft',
@@ -367,9 +462,15 @@ function startAgentProcess(name: string): { ok: boolean; pid?: number; error?: s
     const model = readAgentModel(name)
     const isOllama = !model.startsWith('claude-')
     const ollamaEnv = isOllama ? `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && ` : ''
+    // Apply security profile: write allow/deny list into settings.json, and
+    // skip the dangerously-skip-permissions flag for strict profiles so
+    // Claude Code enforces the list rather than bypassing it.
+    const profile = loadProfileTemplate(readAgentSecurityProfile(name))
+    writeAgentSettingsFromProfile(name, profile)
+    const skipFlag = profile.permissionMode === 'strict' ? '' : '--dangerously-skip-permissions '
     // bun lives under ~/.bun/bin, which isn't in the dashboard's launchd PATH.
     // The Claude plugin launcher spawns `bun`, so we must prepend it here.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && export TELEGRAM_STATE_DIR="${tgStateDir}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} --dangerously-skip-permissions --model ${model} --channels plugin:telegram@claude-plugins-official`
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && export TELEGRAM_STATE_DIR="${tgStateDir}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} ${skipFlag}--model ${model} --channels plugin:telegram@claude-plugins-official`
     execSync(
       `${TMUX} new-session -d -s ${session} "${cmd}"`,
       { timeout: 10000 }
@@ -1326,10 +1427,11 @@ export function startWebServer(port = 3420): http.Server {
       if (path === '/api/agents' && method === 'POST') {
         const body = await readBody(req)
         const data = JSON.parse(body.toString())
-        const { description, model: rawModel } = data as { name: string; description: string; model?: string }
+        const { description, model: rawModel, profile: rawProfile } = data as { name: string; description: string; model?: string; profile?: string }
         const rawName = typeof data.name === 'string' ? data.name.trim() : ''
         const name = sanitizeAgentName(rawName)
         const model = resolveModelId(rawModel || DEFAULT_MODEL)
+        const profileId = (rawProfile || 'default').trim() || 'default'
 
         if (!name) return json(res, { error: 'Name is required' }, 400)
         if (!description) return json(res, { error: 'Description is required' }, 400)
@@ -1337,6 +1439,8 @@ export function startWebServer(port = 3420): http.Server {
 
         scaffoldAgentDir(name)
         writeAgentModel(name, model)
+        writeAgentSecurityProfile(name, profileId)
+        writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
         // Preserve the original (accented, cased) name for UI display; the
         // sanitized form stays the filesystem/API identifier.
         if (rawName && rawName !== name) writeAgentDisplayName(name, rawName)
@@ -1472,6 +1576,52 @@ export function startWebServer(port = 3420): http.Server {
         if (existsSync(envFile)) unlinkSync(envFile)
         if (existsSync(accessFile)) unlinkSync(accessFile)
         return json(res, { ok: true })
+      }
+
+      // GET /api/profiles - list available security profile templates
+      if (path === '/api/profiles' && method === 'GET') {
+        return json(res, listProfileTemplates().map(p => ({
+          id: p.id,
+          label: p.label,
+          description: p.description,
+          permissionMode: p.permissionMode,
+          allowCount: p.filesystem.allow.length,
+          denyCount: p.filesystem.deny.length,
+        })))
+      }
+
+      // GET /api/agents/:name/security - effective security config for an agent
+      const secGetMatch = path.match(/^\/api\/agents\/([^/]+)\/security$/)
+      if (secGetMatch && method === 'GET') {
+        const name = decodeURIComponent(secGetMatch[1])
+        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
+        const profileId = readAgentSecurityProfile(name)
+        const profile = loadProfileTemplate(profileId)
+        const ctx = { HOME: homedir(), AGENT_DIR: agentDir(name) }
+        return json(res, {
+          profile: profileId,
+          label: profile.label,
+          description: profile.description,
+          permissionMode: profile.permissionMode,
+          allow: profile.filesystem.allow.map(p => resolveProfilePlaceholders(p, ctx)),
+          deny: profile.filesystem.deny.map(p => resolveProfilePlaceholders(p, ctx)),
+        })
+      }
+
+      // PUT /api/agents/:name/security - switch profile. Caller should restart
+      // the agent process afterwards for the new allow/deny list to take effect.
+      if (secGetMatch && method === 'PUT') {
+        const name = decodeURIComponent(secGetMatch[1])
+        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
+        const body = await readBody(req)
+        const data = JSON.parse(body.toString()) as { profile?: string }
+        const requested = (data.profile || '').trim()
+        if (!requested) return json(res, { error: 'profile is required' }, 400)
+        const profile = loadProfileTemplate(requested)
+        if (profile.id !== requested) return json(res, { error: `Unknown profile: ${requested}` }, 400)
+        writeAgentSecurityProfile(name, requested)
+        writeAgentSettingsFromProfile(name, profile)
+        return json(res, { ok: true, requiresRestart: isAgentRunning(name) })
       }
 
       // GET /api/agents/:name/telegram/pending - List pending pairing codes.

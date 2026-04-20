@@ -1,0 +1,10 @@
+{
+  "id": "default",
+  "label": "Alapértelmezett (kompatibilitási)",
+  "description": "Régi, skip-permission módú ágensekhez. Új ágenshez inkább válassz szerep-specifikus profilt.",
+  "permissionMode": "permissive",
+  "filesystem": {
+    "allow": [],
+    "deny": []
+  }
+}

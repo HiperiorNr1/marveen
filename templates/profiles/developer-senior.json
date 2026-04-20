@@ -1,0 +1,19 @@
+{
+  "id": "developer-senior",
+  "label": "Fejlesztő (senior)",
+  "description": "Kódfejlesztésre, repo-kezelésre, build-futtatásra optimalizált profil. Szélesebb jogkör, de a legveszélyesebb parancsok (sudo, force-push, rm -rf $HOME) tiltva.",
+  "permissionMode": "permissive",
+  "filesystem": {
+    "allow": [],
+    "deny": [
+      "Read(${HOME}/.ssh/**)",
+      "Read(${HOME}/.aws/**)",
+      "Read(${HOME}/.gnupg/**)",
+      "Bash(sudo:*)",
+      "Bash(rm -rf ${HOME}:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ]
+  }
+}

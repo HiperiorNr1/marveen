@@ -516,6 +516,11 @@
               <option value="claude-haiku-4-5-20251001">Haiku 4.5 (leggyorsabb)</option>
             </select>
           </div>
+          <div class="form-group">
+            <label for="agentProfile">Biztonsági profil</label>
+            <select id="agentProfile"></select>
+            <small id="agentProfileDesc" style="display:block;margin-top:6px;color:var(--text-muted);font-size:12px;line-height:1.4"></small>
+          </div>
           <button class="btn-primary" id="wizardNextBtn">
             <span class="btn-text">Tovább</span>
           </button>
@@ -645,6 +650,12 @@
               </optgroup>
             </select>
             <button class="btn-secondary btn-compact agent-save-section" id="saveModelBtn">Mentés</button>
+          </div>
+          <div class="form-group">
+            <label for="editAgentProfile">Biztonsági profil</label>
+            <select id="editAgentProfile"></select>
+            <small id="editAgentProfileDesc" style="display:block;margin-top:6px;color:var(--text-muted);font-size:12px;line-height:1.4"></small>
+            <button class="btn-secondary btn-compact agent-save-section" id="saveProfileBtn">Mentés</button>
           </div>
           <div class="form-group">
             <label for="editClaudeMd">CLAUDE.md</label>
