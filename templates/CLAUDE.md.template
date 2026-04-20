@@ -97,23 +97,29 @@ A memória 3 rétegből áll (hot/warm/cold) + napi napló.
 
 ### NINCS MENTAL NOTE! Ha meg kell jegyezni -> AZONNAL mentsd:
 
+A dashboard `/api/*` végpontjai Bearer tokennel védettek. A token a
+`store/.dashboard-token` fájlban van, minden példában behúzva.
+
 Memória mentés:
 ```bash
 curl -s -X POST http://localhost:3420/api/memories \
   -H "Content-Type: application/json" \
-  -d '{"agent_id":"marveen","content":"MIT","tier":"TIER","keywords":"kulcsszó1, kulcsszó2"}'
+  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
+  -d '{"agent_id":"marveen","content":"MIT","category":"CATEGORY","keywords":"kulcsszó1, kulcsszó2"}'
 ```
 
 Napi napló (append-only):
 ```bash
 curl -s -X POST http://localhost:3420/api/daily-log \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
   -d '{"agent_id":"marveen","content":"## HH:MM -- Téma\nMi történt, mi lett az eredmény"}'
 ```
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
 ```bash
-curl -s "http://localhost:3420/api/memories?agent=marveen&q=KULCSSZÓ&tier=warm"
+curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" \
+  "http://localhost:3420/api/memories?agent=marveen&q=KULCSSZÓ&category=warm"
 ```
 
 ## Kanban tábla
@@ -163,6 +169,7 @@ Ha delegálni akarsz egy feladatot másik ágensnek, használd az API-t:
 ```bash
 curl -s -X POST http://localhost:3420/api/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
   -d '{"from": "marveen", "to": "TARGET_AGENT", "content": "Feladat leírása."}'
 ```
 
@@ -173,7 +180,7 @@ A rendszer automatikusan:
 
 ### Fontos szabályok
 - Csak futó ágensnek lehet üzenni (tmux session kell hozzá)
-- Az elérhető ágensek listája: `curl -s http://localhost:3420/api/agents`
+- Az elérhető ágensek listája: `curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" http://localhost:3420/api/agents`
 
 ## Öntanulás és Skill rendszer
 
