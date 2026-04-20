@@ -1280,6 +1280,123 @@ function isSessionReadyForPrompt(session: string): boolean {
   }
 }
 
+// --- Update checker ---
+// Polls the GitHub repo's main branch for new commits and compares to the
+// local HEAD. Lets the dashboard show a "new version available" badge
+// without anyone having to SSH in and run update.sh.
+
+interface UpdateCommit {
+  sha: string
+  short: string
+  message: string
+  author: string
+  date: string
+}
+
+interface UpdateStatus {
+  current: string
+  latest: string
+  behind: number
+  commits: UpdateCommit[]
+  remote: string
+  lastChecked: number
+  error?: string
+}
+
+let updateStatusCache: UpdateStatus = {
+  current: '',
+  latest: '',
+  behind: 0,
+  commits: [],
+  remote: 'Szotasz/marveen',
+  lastChecked: 0,
+}
+
+function currentGitHead(): string {
+  try {
+    return execFileSync('/usr/bin/git', ['rev-parse', 'HEAD'], { cwd: PROJECT_ROOT, timeout: 3000, encoding: 'utf-8' }).trim()
+  } catch {
+    return ''
+  }
+}
+
+function parseGitHubRemote(): string {
+  try {
+    const url = execFileSync('/usr/bin/git', ['config', '--get', 'remote.origin.url'], { cwd: PROJECT_ROOT, timeout: 3000, encoding: 'utf-8' }).trim()
+    // Normalize "git@github.com:Owner/Repo.git" or "https://github.com/Owner/Repo.git" to "Owner/Repo"
+    const m = url.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/i)
+    if (m) return m[1]
+  } catch { /* fall through */ }
+  return 'Szotasz/marveen'
+}
+
+async function refreshUpdateStatus(): Promise<UpdateStatus> {
+  const current = currentGitHead()
+  const remote = parseGitHubRemote()
+  const status: UpdateStatus = {
+    current,
+    latest: '',
+    behind: 0,
+    commits: [],
+    remote,
+    lastChecked: Date.now(),
+  }
+  if (!current) {
+    status.error = 'Not a git checkout'
+    updateStatusCache = status
+    return status
+  }
+  try {
+    // 1) find HEAD of default branch (main) via the commits endpoint
+    const latestRes = await fetch(`https://api.github.com/repos/${remote}/commits/main`, {
+      headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'marveen-update-check' },
+    })
+    if (!latestRes.ok) throw new Error(`GitHub /commits/main -> ${latestRes.status}`)
+    const latestJson = await latestRes.json() as { sha?: string }
+    if (!latestJson.sha) throw new Error('No sha on commits/main response')
+    status.latest = latestJson.sha
+
+    if (status.latest === current) {
+      updateStatusCache = status
+      return status
+    }
+
+    // 2) list commits between current and latest via the compare endpoint
+    const cmpRes = await fetch(`https://api.github.com/repos/${remote}/compare/${current}...${status.latest}`, {
+      headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'marveen-update-check' },
+    })
+    if (cmpRes.ok) {
+      const cmp = await cmpRes.json() as {
+        ahead_by?: number
+        commits?: { sha: string; commit: { message: string; author: { name: string; date: string } } }[]
+      }
+      status.behind = cmp.ahead_by ?? 0
+      // GitHub returns commits oldest-first; flip to newest-first for the UI.
+      const raw = (cmp.commits ?? []).slice().reverse()
+      status.commits = raw.map(c => ({
+        sha: c.sha,
+        short: c.sha.slice(0, 7),
+        message: (c.commit.message || '').split('\n')[0],
+        author: c.commit.author?.name || '',
+        date: c.commit.author?.date || '',
+      }))
+    } else if (cmpRes.status === 404) {
+      // Local HEAD not on the remote (detached local commit / different base).
+      status.error = 'Local HEAD not found on GitHub -- different fork or unpushed commits?'
+    }
+  } catch (err) {
+    status.error = err instanceof Error ? err.message : String(err)
+  }
+  updateStatusCache = status
+  return status
+}
+
+function startUpdateChecker(): NodeJS.Timeout {
+  // First check shortly after startup; then every 15 minutes.
+  setTimeout(() => { refreshUpdateStatus().catch(() => {}) }, 10_000)
+  return setInterval(() => { refreshUpdateStatus().catch(() => {}) }, 15 * 60_000)
+}
+
 function startScheduleRunner(): NodeJS.Timeout {
   let firstRun = true
 
@@ -1576,6 +1693,33 @@ export function startWebServer(port = 3420): http.Server {
         if (existsSync(envFile)) unlinkSync(envFile)
         if (existsSync(accessFile)) unlinkSync(accessFile)
         return json(res, { ok: true })
+      }
+
+      // GET /api/updates - current vs GitHub main, with commit list between
+      if (path === '/api/updates' && method === 'GET') {
+        return json(res, updateStatusCache)
+      }
+
+      // POST /api/updates/check - force an immediate refresh
+      if (path === '/api/updates/check' && method === 'POST') {
+        const status = await refreshUpdateStatus()
+        return json(res, status)
+      }
+
+      // POST /api/updates/apply - spawn update.sh in the background.
+      // The script restarts the dashboard itself, so we reply immediately
+      // and the browser reloads after a short delay.
+      if (path === '/api/updates/apply' && method === 'POST') {
+        try {
+          spawn('/bin/bash', [join(PROJECT_ROOT, 'update.sh')], {
+            cwd: PROJECT_ROOT,
+            detached: true,
+            stdio: 'ignore',
+          }).unref()
+          return json(res, { ok: true })
+        } catch (err) {
+          return json(res, { error: err instanceof Error ? err.message : String(err) }, 500)
+        }
       }
 
       // GET /api/profiles - list available security profile templates
@@ -3281,6 +3425,10 @@ Respond ONLY with JSON, nothing else:
   const pluginMonitorInterval = startTelegramPluginMonitor()
   logger.info('Telegram plugin health monitor started (60s poll)')
 
+  // Start update checker -- polls GitHub every 15 min for new commits.
+  const updateCheckerInterval = startUpdateChecker()
+  logger.info('Update checker started (15min poll)')
+
   // Warm the Marveen bot username cache so /api/marveen returns @username
   // on the first dashboard load. Re-fetched lazily otherwise.
   refreshMarveenBotUsername().catch(() => {})
@@ -3291,6 +3439,7 @@ Respond ONLY with JSON, nothing else:
     clearInterval(routerInterval)
     clearInterval(scheduleInterval)
     clearInterval(pluginMonitorInterval)
+    clearInterval(updateCheckerInterval)
     return origClose(cb)
   }
 

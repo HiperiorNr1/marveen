@@ -77,6 +77,7 @@ function switchPage(pageId) {
   if (pageId === 'connectors') loadConnectors()
   if (pageId === 'migrate') loadMigrateAgents()
   if (pageId === 'status') loadStatus()
+  if (pageId === 'updates') loadUpdates()
 }
 
 navLinks.forEach((link) => {
@@ -4343,6 +4344,109 @@ async function openSkillDetail(skillName) {
 
   openModal(skillDetailOverlay)
 }
+
+// === Updates page ===
+function escapeHtmlUpdates(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function renderUpdatesBadge(status) {
+  const badge = document.getElementById('updatesBadge')
+  if (!badge) return
+  if (status && status.behind && status.behind > 0) {
+    badge.textContent = String(status.behind)
+    badge.hidden = false
+  } else {
+    badge.hidden = true
+  }
+}
+
+async function pollUpdatesBadge() {
+  try {
+    const res = await fetch('/api/updates')
+    if (!res.ok) return
+    renderUpdatesBadge(await res.json())
+  } catch {}
+}
+
+async function loadUpdates() {
+  const summary = document.getElementById('updatesSummary')
+  const list = document.getElementById('updatesCommitList')
+  const applyBtn = document.getElementById('updatesApplyBtn')
+  summary.textContent = 'Ellenőrzés...'
+  summary.className = 'updates-summary'
+  list.innerHTML = ''
+  try {
+    const res = await fetch('/api/updates')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    renderUpdatesBadge(data)
+    const cur = (data.current || '').slice(0, 7) || '–'
+    const lat = (data.latest || '').slice(0, 7) || '–'
+    if (data.error) {
+      summary.className = 'updates-summary error'
+      summary.innerHTML = `<strong>Nem sikerült ellenőrizni:</strong> ${escapeHtmlUpdates(data.error)}<br>Jelenlegi: <code>${cur}</code>`
+      applyBtn.hidden = true
+    } else if (data.behind === 0) {
+      summary.className = 'updates-summary up-to-date'
+      summary.innerHTML = `<strong>A legfrissebb verzión vagy</strong> (<code>${cur}</code>). Nincs teendő.`
+      applyBtn.hidden = true
+    } else {
+      summary.className = 'updates-summary behind'
+      summary.innerHTML = `<strong>${data.behind} új commit elérhető</strong> a <code>${escapeHtmlUpdates(data.remote)}</code> repón.<br>Jelenlegi: <code>${cur}</code> → Legfrissebb: <code>${lat}</code>`
+      applyBtn.hidden = false
+    }
+    if (data.commits && data.commits.length) {
+      list.innerHTML = data.commits.map(c => `
+        <div class="updates-commit">
+          <div class="updates-commit-head">
+            <span>${escapeHtmlUpdates(c.short)} · ${escapeHtmlUpdates(c.author)}</span>
+            <span>${escapeHtmlUpdates((c.date || '').slice(0, 10))}</span>
+          </div>
+          <div class="updates-commit-msg">${escapeHtmlUpdates(c.message)}</div>
+        </div>
+      `).join('')
+    } else if (data.behind === 0) {
+      list.innerHTML = `<p style="color:var(--text-muted);font-size:13px">Nincs változás.</p>`
+    }
+  } catch (err) {
+    summary.className = 'updates-summary error'
+    summary.textContent = 'Hiba: ' + (err.message || err)
+    applyBtn.hidden = true
+  }
+}
+
+document.getElementById('updatesCheckBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('updatesCheckBtn')
+  btn.disabled = true
+  try { await fetch('/api/updates/check', { method: 'POST' }) } catch {}
+  await loadUpdates()
+  btn.disabled = false
+})
+
+document.getElementById('updatesApplyBtn').addEventListener('click', async () => {
+  if (!confirm('Frissítés most. A szolgáltatások újraindulnak, a dashboard ~30 másodpercig nem érhető el. Folytatod?')) return
+  const btn = document.getElementById('updatesApplyBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+  try {
+    const res = await fetch('/api/updates/apply', { method: 'POST' })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    showToast('Frissítés elindult, a dashboard újratöltődik...')
+    setTimeout(() => window.location.reload(), 30000)
+  } catch (err) {
+    showToast('Hiba: ' + (err.message || err))
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// Poll the badge on startup and every 5 min so the nav link reflects
+// the cached status even on tabs other than the Updates page.
+pollUpdatesBadge()
+setInterval(pollUpdatesBadge, 5 * 60_000)
 
 // === Init ===
 populateAvatarGrid()
