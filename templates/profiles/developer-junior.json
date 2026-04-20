@@ -1,0 +1,35 @@
+{
+  "id": "developer-junior",
+  "label": "Fejlesztő (junior)",
+  "description": "Feature-fejlesztésre saját branch-en. A main/master-re tiltott push, sudo tiltott, SSH/AWS kulcsok elrejtve. Csak a saját munkakönyvtárába írhat.",
+  "permissionMode": "strict",
+  "filesystem": {
+    "allow": [
+      "Read(${AGENT_DIR}/**)",
+      "Write(${AGENT_DIR}/**)",
+      "Edit(${AGENT_DIR}/**)",
+      "Read(/tmp/**)",
+      "Write(/tmp/**)",
+      "Bash(git:*)",
+      "Bash(npm:*)",
+      "Bash(node:*)",
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(pwd:*)",
+      "WebFetch(*)",
+      "WebSearch(*)"
+    ],
+    "deny": [
+      "Read(${HOME}/.ssh/**)",
+      "Read(${HOME}/.aws/**)",
+      "Read(${HOME}/.gnupg/**)",
+      "Bash(sudo:*)",
+      "Bash(rm -rf ${HOME}:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push origin main:*)",
+      "Bash(git push origin master:*)"
+    ]
+  }
+}

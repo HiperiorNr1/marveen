@@ -23,7 +23,7 @@ import {
   markMessageDone, markMessageFailed, listAgentMessages, getAgentMessage,
   type Memory, type AgentMessage,
 } from './db.js'
-import { OWNER_NAME, BOT_NAME, ALLOWED_CHAT_ID, HEARTBEAT_CALENDAR_ID } from './config.js'
+import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, ALLOWED_CHAT_ID, HEARTBEAT_CALENDAR_ID } from './config.js'
 import { wrapUntrusted } from './prompt-safety.js'
 
 function computeNextRun(cronExpression: string): number {
@@ -91,6 +91,7 @@ interface AgentSummary {
   displayName: string
   description: string
   model: string
+  securityProfile: string
   hasTelegram: boolean
   telegramBotUsername?: string
   status: 'configured' | 'draft'
@@ -302,6 +303,99 @@ function writeAgentDisplayName(name: string, displayName: string): void {
   writeFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
+// --- Security profiles ---
+//
+// Each profile is a JSON file under templates/profiles/ with an allow/deny
+// list that Claude Code's native permissions engine understands. Choosing a
+// strict profile also drops --dangerously-skip-permissions, so Claude Code
+// enforces the allow/deny list rather than bypassing it. Channels plugin
+// permission prompts (the Telegram Allow/Deny inline buttons) still fire
+// because they live on a different notification channel.
+
+interface ProfileTemplate {
+  id: string
+  label: string
+  description: string
+  permissionMode: 'strict' | 'permissive'
+  filesystem: { allow: string[]; deny: string[] }
+}
+
+const PROFILES_DIR = join(PROJECT_ROOT, 'templates', 'profiles')
+const HARDCODED_DEFAULT_PROFILE: ProfileTemplate = {
+  id: 'default',
+  label: 'Alapértelmezett',
+  description: 'Permissive fallback.',
+  permissionMode: 'permissive',
+  filesystem: { allow: [], deny: [] },
+}
+
+function listProfileTemplates(): ProfileTemplate[] {
+  if (!existsSync(PROFILES_DIR)) return [HARDCODED_DEFAULT_PROFILE]
+  const out: ProfileTemplate[] = []
+  for (const f of readdirSync(PROFILES_DIR)) {
+    if (!f.endsWith('.json')) continue
+    try {
+      const p = JSON.parse(readFileSync(join(PROFILES_DIR, f), 'utf-8')) as ProfileTemplate
+      if (p.id) out.push(p)
+    } catch { /* skip malformed */ }
+  }
+  return out.length ? out : [HARDCODED_DEFAULT_PROFILE]
+}
+
+function loadProfileTemplate(id: string): ProfileTemplate {
+  const path = join(PROFILES_DIR, `${id}.json`)
+  if (existsSync(path)) {
+    try { return JSON.parse(readFileSync(path, 'utf-8')) as ProfileTemplate } catch { /* fall through */ }
+  }
+  if (id !== 'default') return loadProfileTemplate('default')
+  return HARDCODED_DEFAULT_PROFILE
+}
+
+function readAgentSecurityProfile(name: string): string {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    if (typeof config.securityProfile === 'string' && config.securityProfile.trim()) {
+      return config.securityProfile.trim()
+    }
+  } catch { /* fall through */ }
+  return 'default'
+}
+
+function writeAgentSecurityProfile(name: string, profileId: string): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
+  config.securityProfile = profileId
+  writeFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
+function resolveProfilePlaceholders(value: string, ctx: { HOME: string; AGENT_DIR: string }): string {
+  return value
+    .replace(/\$\{HOME\}/g, ctx.HOME)
+    .replace(/\$\{AGENT_DIR\}/g, ctx.AGENT_DIR)
+    .replace(/\$\{WORKDIR\}/g, ctx.AGENT_DIR)
+}
+
+// Merges the profile's allow/deny entries into agents/<name>/.claude/settings.json,
+// preserving any other keys (hooks, custom flags) the user added by hand.
+function writeAgentSettingsFromProfile(name: string, profile: ProfileTemplate): void {
+  const agentRoot = agentDir(name)
+  const settingsDir = join(agentRoot, '.claude')
+  const settingsPath = join(settingsDir, 'settings.json')
+  mkdirSync(settingsDir, { recursive: true })
+  let existing: Record<string, unknown> = {}
+  if (existsSync(settingsPath)) {
+    try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
+  }
+  const ctx = { HOME: homedir(), AGENT_DIR: agentRoot }
+  existing.permissions = {
+    allow: profile.filesystem.allow.map(p => resolveProfilePlaceholders(p, ctx)),
+    deny: profile.filesystem.deny.map(p => resolveProfilePlaceholders(p, ctx)),
+  }
+  writeFileSync(settingsPath, JSON.stringify(existing, null, 2))
+}
+
 function readAgentTelegramConfig(name: string): { hasTelegram: boolean; botUsername?: string } {
   const envPath = join(agentDir(name), '.claude', 'channels', 'telegram', '.env')
   if (!existsSync(envPath)) return { hasTelegram: false }
@@ -358,6 +452,7 @@ function getAgentSummary(name: string): AgentSummary {
     displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
+    securityProfile: readAgentSecurityProfile(name),
     hasTelegram: tg.hasTelegram,
     telegramBotUsername: tg.botUsername,
     status: hasClaudeMd && hasSoulMd ? 'configured' : 'draft',
@@ -451,10 +546,15 @@ function startAgentProcess(name: string): { ok: boolean; pid?: number; error?: s
     const model = readAgentModel(name)
     const isOllama = !model.startsWith('claude-')
     const ollamaEnv = isOllama ? `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && ` : ''
-    const bunBin = join(homedir(), '.bun', 'bin')
-    const basePath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'
-    const fullPath = basePath.includes(bunBin) ? basePath : `${bunBin}:${basePath}`
-    const cmd = `export TELEGRAM_STATE_DIR="${tgStateDir}" && export PATH="${fullPath}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} --dangerously-skip-permissions --model ${model} --channels plugin:telegram@claude-plugins-official`
+    // Apply security profile: write allow/deny list into settings.json, and
+    // skip the dangerously-skip-permissions flag for strict profiles so
+    // Claude Code enforces the list rather than bypassing it.
+    const profile = loadProfileTemplate(readAgentSecurityProfile(name))
+    writeAgentSettingsFromProfile(name, profile)
+    const skipFlag = profile.permissionMode === 'strict' ? '' : '--dangerously-skip-permissions '
+    // bun lives under ~/.bun/bin, which isn't in the dashboard's launchd PATH.
+    // The Claude plugin launcher spawns `bun`, so we must prepend it here.
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && export TELEGRAM_STATE_DIR="${tgStateDir}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} ${skipFlag}--model ${model} --channels plugin:telegram@claude-plugins-official`
     execSync(
       `${TMUX} new-session -d -s ${session} "${cmd}"`,
       { timeout: 10000 }
@@ -845,7 +945,7 @@ function readScheduledTask(taskName: string): ScheduledTask | null {
     description: description || '',
     prompt: body,
     schedule: config.schedule || '0 9 * * *',
-    agent: config.agent || 'marveen',
+    agent: config.agent || MAIN_AGENT_ID,
     enabled: config.enabled !== false,
     createdAt: config.createdAt || 0,
     type: (config.type as 'task' | 'heartbeat') || 'task',
@@ -975,8 +1075,8 @@ function startMessageRouter(): NodeJS.Timeout {
 // by walking the process tree. (We deliberately don't pane-scan for
 // "Failed to reconnect" strings -- those persist in scrollback and fire
 // false positives, e.g. if the source containing the regex is shown.)
-// Agents recover via stop+start; for marveen-channels we can only alert,
-// because killing it would terminate the live Marveen session.
+// Agents recover via stop+start; for the main agent's channels session
+// we can only alert, because killing it would terminate the live agent.
 
 function getClaudePidForSession(session: string): number | null {
   try {
@@ -1032,7 +1132,8 @@ function hasTelegramPluginAlive(claudePid: number): boolean {
 
 const agentDownSince: Map<string, number> = new Map()
 const PLUGIN_ALERT_DEDUP_MS = 30 * 60 * 1000
-const MARVEEN_CHANNELS_PLIST = join(homedir(), 'Library', 'LaunchAgents', 'com.marveen.channels.plist')
+const MAIN_CHANNELS_SESSION = `${MAIN_AGENT_ID}-channels`
+const MAIN_CHANNELS_PLIST = join(homedir(), 'Library', 'LaunchAgents', `com.${MAIN_AGENT_ID}.channels.plist`)
 
 // Marveen recovery is a 4-stage escalator because killing the session
 // terminates the live Marveen conversation, so we try cheap fixes first.
@@ -1065,11 +1166,11 @@ function softReconnectMarveen(): void {
   // the first action (Reconnect if the plugin is disconnected). We send
   // Escape first in case a different dialog is already open.
   try {
-    execFileSync(TMUX, ['send-keys', '-t', 'marveen-channels', 'Escape'], { timeout: 3000 })
+    execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, 'Escape'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['0.2'], { timeout: 1000 })
-    execFileSync(TMUX, ['send-keys', '-t', 'marveen-channels', '/mcp', 'Enter'], { timeout: 3000 })
+    execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, '/mcp', 'Enter'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['0.3'], { timeout: 1000 })
-    execFileSync(TMUX, ['send-keys', '-t', 'marveen-channels', 'Enter'], { timeout: 3000 })
+    execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, 'Enter'], { timeout: 3000 })
     logger.info('Marveen soft reconnect: sent /mcp + Enter')
   } catch (err) {
     logger.warn({ err }, 'Marveen soft reconnect failed')
@@ -1083,29 +1184,29 @@ function triggerMarveenMemorySave(): void {
   // reaches the agent as an input turn.
   const prompt = [
     '[SYSTEM: channels recovery] A Telegram plugin nem reagál, kb 60 másodperc',
-    'múlva hard restart lesz a marveen-channels session-ön (a beszélgetés elvész).',
+    `múlva hard restart lesz a ${MAIN_CHANNELS_SESSION} session-ön (a beszélgetés elvész).`,
     'MOST mentsd el a ClaudeClaw memóriába amit a következő sessionnek tudnia kell:',
-    'aktív feladatok (tier hot), friss döntések/preferenciák (warm), tanulságok (cold).',
+    'aktív feladatok (category hot), friss döntések/preferenciák (warm), tanulságok (cold).',
     'Használd: curl -s -X POST http://localhost:3420/api/memories ... (lásd CLAUDE.md).',
     'Ha kész vagy, írj egy rövid napi napló bejegyzést is a /api/daily-log-ra. Utána elég.',
   ].join(' ')
   try {
-    sendPromptToSession('marveen-channels', prompt)
-    logger.info('Marveen memory-save prompt dispatched before hard restart')
+    sendPromptToSession(MAIN_CHANNELS_SESSION, prompt)
+    logger.info(`${BOT_NAME} memory-save prompt dispatched before hard restart`)
   } catch (err) {
-    logger.warn({ err }, 'Failed to dispatch marveen memory-save prompt')
+    logger.warn({ err }, `Failed to dispatch ${BOT_NAME} memory-save prompt`)
   }
 }
 
 export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   try {
-    execFileSync('/bin/launchctl', ['unload', MARVEEN_CHANNELS_PLIST], { timeout: 5000 })
+    execFileSync('/bin/launchctl', ['unload', MAIN_CHANNELS_PLIST], { timeout: 5000 })
     execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
-    execFileSync('/bin/launchctl', ['load', MARVEEN_CHANNELS_PLIST], { timeout: 5000 })
-    logger.warn('Marveen hard restart: launchctl reload of com.marveen.channels')
+    execFileSync('/bin/launchctl', ['load', MAIN_CHANNELS_PLIST], { timeout: 5000 })
+    logger.warn(`Hard restart: launchctl reload of com.${MAIN_AGENT_ID}.channels`)
     return { ok: true }
   } catch (err) {
-    logger.error({ err }, 'Marveen hard restart failed')
+    logger.error({ err }, 'Hard restart failed')
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
@@ -1134,7 +1235,7 @@ function handleMarveenDown(): void {
     marveenDownState.stage = 'hard'
     marveenDownState.lastAlertAt = now
     logger.warn('Marveen Telegram plugin still down -- stage 3 (hard restart)')
-    sendMarveenAlert('⚠️ Memória mentés türelmi idő lejárt. Hard restart most a marveen-channels session-ön (új session a SQLite memóriával indul).').catch(() => {})
+    sendMarveenAlert(`⚠️ Memória mentés türelmi idő lejárt. Hard restart most a ${MAIN_CHANNELS_SESSION} session-ön (új session a SQLite memóriával indul).`).catch(() => {})
     hardRestartMarveenChannels()
     return
   }
@@ -1143,7 +1244,7 @@ function handleMarveenDown(): void {
     marveenDownState.stage = 'gave_up'
     marveenDownState.lastAlertAt = now
     logger.error('Marveen Telegram plugin still down after hard restart -- giving up auto-recovery')
-    sendMarveenAlert('🚨 Hard restart SEM segített. Kézzel kell megnézni: `tmux attach -t marveen-channels` és `launchctl list | grep marveen`.').catch(() => {})
+    sendMarveenAlert(`🚨 Hard restart SEM segített. Kézzel kell megnézni: \`tmux attach -t ${MAIN_CHANNELS_SESSION}\` és \`launchctl list | grep ${MAIN_AGENT_ID}\`.`).catch(() => {})
     return
   }
   // gave_up -- re-alert at most every PLUGIN_ALERT_DEDUP_MS.
@@ -1171,7 +1272,7 @@ function handleMarveenUp(): void {
 function startTelegramPluginMonitor(): NodeJS.Timeout {
   function check() {
     type Target = { session: string; isMarveen: boolean; agentName?: string }
-    const targets: Target[] = [{ session: 'marveen-channels', isMarveen: true }]
+    const targets: Target[] = [{ session: MAIN_CHANNELS_SESSION, isMarveen: true }]
     for (const a of listAgentNames()) {
       if (isAgentRunning(a)) targets.push({ session: agentSessionName(a), isMarveen: false, agentName: a })
     }
@@ -1287,15 +1388,15 @@ function startScheduleRunner(): NodeJS.Timeout {
       if (task.agent === 'all') {
         // Broadcast to all running agents + marveen
         const running = listAgentNames().filter(a => isAgentRunning(a))
-        targetAgents = ['marveen', ...running]
+        targetAgents = [MAIN_AGENT_ID, ...running]
       } else {
-        targetAgents = [task.agent || 'marveen']
+        targetAgents = [task.agent || MAIN_AGENT_ID]
       }
 
       for (const agentName of targetAgents) {
 
-      const isMarveen = agentName === 'marveen'
-      const session = isMarveen ? 'marveen-channels' : agentSessionName(agentName)
+      const isMainAgent = agentName === MAIN_AGENT_ID
+      const session = isMainAgent ? MAIN_CHANNELS_SESSION : agentSessionName(agentName)
 
       // Check if the target session exists
       let sessionExists = false
@@ -1410,10 +1511,11 @@ export function startWebServer(port = 3420): http.Server {
       if (path === '/api/agents' && method === 'POST') {
         const body = await readBody(req)
         const data = JSON.parse(body.toString())
-        const { description, model: rawModel } = data as { name: string; description: string; model?: string }
+        const { description, model: rawModel, profile: rawProfile } = data as { name: string; description: string; model?: string; profile?: string }
         const rawName = typeof data.name === 'string' ? data.name.trim() : ''
         const name = sanitizeAgentName(rawName)
         const model = resolveModelId(rawModel || DEFAULT_MODEL)
+        const profileId = (rawProfile || 'default').trim() || 'default'
 
         if (!name) return json(res, { error: 'Name is required' }, 400)
         if (!description) return json(res, { error: 'Description is required' }, 400)
@@ -1421,6 +1523,8 @@ export function startWebServer(port = 3420): http.Server {
 
         scaffoldAgentDir(name)
         writeAgentModel(name, model)
+        writeAgentSecurityProfile(name, profileId)
+        writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
         // Preserve the original (accented, cased) name for UI display; the
         // sanitized form stays the filesystem/API identifier.
         if (rawName && rawName !== name) writeAgentDisplayName(name, rawName)
@@ -1439,7 +1543,7 @@ export function startWebServer(port = 3420): http.Server {
           const allAgents = listAgentNames()
           const runningAgents = allAgents.filter(a => a !== name && isAgentRunning(a))
           // Also notify Marveen (main session)
-          const notifyTargets = ['marveen', ...runningAgents]
+          const notifyTargets = [MAIN_AGENT_ID, ...runningAgents]
           for (const target of notifyTargets) {
             createAgentMessage('system', target, `Uj csapattag erkezett: ${name}. Leirasa: ${description}. Udv neki ha legkozelebb beszeltek!`)
           }
@@ -1558,16 +1662,62 @@ export function startWebServer(port = 3420): http.Server {
         return json(res, { ok: true })
       }
 
+      // GET /api/profiles - list available security profile templates
+      if (path === '/api/profiles' && method === 'GET') {
+        return json(res, listProfileTemplates().map(p => ({
+          id: p.id,
+          label: p.label,
+          description: p.description,
+          permissionMode: p.permissionMode,
+          allowCount: p.filesystem.allow.length,
+          denyCount: p.filesystem.deny.length,
+        })))
+      }
+
+      // GET /api/agents/:name/security - effective security config for an agent
+      const secGetMatch = path.match(/^\/api\/agents\/([^/]+)\/security$/)
+      if (secGetMatch && method === 'GET') {
+        const name = decodeURIComponent(secGetMatch[1])
+        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
+        const profileId = readAgentSecurityProfile(name)
+        const profile = loadProfileTemplate(profileId)
+        const ctx = { HOME: homedir(), AGENT_DIR: agentDir(name) }
+        return json(res, {
+          profile: profileId,
+          label: profile.label,
+          description: profile.description,
+          permissionMode: profile.permissionMode,
+          allow: profile.filesystem.allow.map(p => resolveProfilePlaceholders(p, ctx)),
+          deny: profile.filesystem.deny.map(p => resolveProfilePlaceholders(p, ctx)),
+        })
+      }
+
+      // PUT /api/agents/:name/security - switch profile. Caller should restart
+      // the agent process afterwards for the new allow/deny list to take effect.
+      if (secGetMatch && method === 'PUT') {
+        const name = decodeURIComponent(secGetMatch[1])
+        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
+        const body = await readBody(req)
+        const data = JSON.parse(body.toString()) as { profile?: string }
+        const requested = (data.profile || '').trim()
+        if (!requested) return json(res, { error: 'profile is required' }, 400)
+        const profile = loadProfileTemplate(requested)
+        if (profile.id !== requested) return json(res, { error: `Unknown profile: ${requested}` }, 400)
+        writeAgentSecurityProfile(name, requested)
+        writeAgentSettingsFromProfile(name, profile)
+        return json(res, { ok: true, requiresRestart: isAgentRunning(name) })
+      }
+
       // GET /api/agents/:name/telegram/pending - List pending pairing codes.
       // Marveen is special-cased to read from the global ~/.claude/channels
       // path, which is where her plugin actually stores access state.
       const tgPendingMatch = path.match(/^\/api\/agents\/([^/]+)\/telegram\/pending$/)
       if (tgPendingMatch && method === 'GET') {
         const name = decodeURIComponent(tgPendingMatch[1])
-        const accessPath = name === 'marveen'
+        const accessPath = name === MAIN_AGENT_ID
           ? join(homedir(), '.claude', 'channels', 'telegram', 'access.json')
           : join(agentDir(name), '.claude', 'channels', 'telegram', 'access.json')
-        if (name !== 'marveen' && !existsSync(agentDir(name))) {
+        if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) {
           return json(res, { error: 'Agent not found' }, 404)
         }
         const accessContent = readFileOr(accessPath, '{}')
@@ -1591,7 +1741,7 @@ export function startWebServer(port = 3420): http.Server {
       const tgApproveMatch = path.match(/^\/api\/agents\/([^/]+)\/telegram\/approve$/)
       if (tgApproveMatch && method === 'POST') {
         const name = decodeURIComponent(tgApproveMatch[1])
-        if (name !== 'marveen' && !existsSync(agentDir(name))) {
+        if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) {
           return json(res, { error: 'Agent not found' }, 404)
         }
 
@@ -1599,7 +1749,7 @@ export function startWebServer(port = 3420): http.Server {
         const { code } = JSON.parse(body.toString()) as { code: string }
         if (!code?.trim()) return json(res, { error: 'Code is required' }, 400)
 
-        const tgDir = name === 'marveen'
+        const tgDir = name === MAIN_AGENT_ID
           ? join(homedir(), '.claude', 'channels', 'telegram')
           : join(agentDir(name), '.claude', 'channels', 'telegram')
         const accessPath = join(tgDir, 'access.json')
@@ -1789,7 +1939,7 @@ export function startWebServer(port = 3420): http.Server {
       if (path === '/api/schedules/agents' && method === 'GET') {
         const agentNames = listAgentNames()
         const agents = [
-          { name: 'marveen', label: BOT_NAME, avatar: '/api/marveen/avatar' },
+          { name: MAIN_AGENT_ID, label: BOT_NAME, avatar: '/api/marveen/avatar' },
           ...agentNames.map(n => ({ name: n, label: n, avatar: `/api/agents/${encodeURIComponent(n)}/avatar` }))
         ]
         return json(res, agents)
@@ -1879,7 +2029,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
           description: data.description || '',
           prompt: data.prompt.trim(),
           schedule: data.schedule.trim(),
-          agent: data.agent || 'marveen',
+          agent: data.agent || MAIN_AGENT_ID,
           enabled: true,
           type: data.type || 'task',
         })
@@ -2160,7 +2310,7 @@ Rovid leiras: "${finalPrompt}"`
           return json(res, { error: `Invalid category "${category}". Allowed: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
         }
         const result = saveAgentMemory(
-          data.agent_id || 'marveen',
+          data.agent_id || MAIN_AGENT_ID,
           data.content.trim(),
           category,
           data.keywords || undefined,
@@ -2178,7 +2328,7 @@ Rovid leiras: "${finalPrompt}"`
 
         let results: Memory[]
         if (q && mode === 'hybrid') {
-          results = await hybridSearch(agentId || 'marveen', q, limit)
+          results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit)
         } else if (q && agentId) {
           results = searchAgentMemories(agentId, q, limit)
           if (results.length === 0) {
@@ -2218,7 +2368,7 @@ Rovid leiras: "${finalPrompt}"`
           return json(res, { error: 'No chunks to import' }, 400)
         }
 
-        const agentId = agent_id || 'marveen'
+        const agentId = agent_id || MAIN_AGENT_ID
         const stats = { hot: 0, warm: 0, cold: 0, shared: 0 }
         let imported = 0
 
@@ -2352,19 +2502,19 @@ Respond ONLY with JSON, nothing else:
         const body = await readBody(req)
         const data = JSON.parse(body.toString()) as { agent_id?: string; content: string }
         if (!data.content?.trim()) return json(res, { error: 'Content required' }, 400)
-        appendDailyLog(data.agent_id || 'marveen', data.content.trim())
+        appendDailyLog(data.agent_id || MAIN_AGENT_ID, data.content.trim())
         return json(res, { ok: true })
       }
 
       if (path === '/api/daily-log' && method === 'GET') {
-        const agent = url.searchParams.get('agent') || 'marveen'
+        const agent = url.searchParams.get('agent') || MAIN_AGENT_ID
         const date = url.searchParams.get('date') || new Date().toISOString().split('T')[0]
         const entries = getDailyLog(agent, date)
         return json(res, entries)
       }
 
       if (path === '/api/daily-log/dates' && method === 'GET') {
-        const agent = url.searchParams.get('agent') || 'marveen'
+        const agent = url.searchParams.get('agent') || MAIN_AGENT_ID
         const dates = getDailyLogDates(agent)
         return json(res, dates)
       }
@@ -2824,7 +2974,7 @@ Respond ONLY with JSON, nothing else:
           agentId: string
         }
 
-        const agentId = targetAgent || 'marveen'
+        const agentId = targetAgent || MAIN_AGENT_ID
         let imported = 0
         const stats = { hot: 0, warm: 0, cold: 0, shared: 0 }
         const details: string[] = []
