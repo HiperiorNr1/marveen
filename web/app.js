@@ -4482,10 +4482,14 @@ function renderTeamEditor(agent, allAgents) {
 
 document.getElementById('saveTeamBtn').addEventListener('click', async () => {
   if (!currentAgent || currentAgent.role === 'main') return
+  const btn = document.getElementById('saveTeamBtn')
   const role = document.getElementById('editTeamRole').value
   const reportsToRaw = document.getElementById('editTeamReportsTo').value
   const delegates = Array.from(document.querySelectorAll('#editTeamDelegatesList input[type=checkbox]:checked')).map(cb => cb.value)
   const autoDelegation = document.getElementById('editTeamAutoDelegation').checked
+  const originalText = btn.textContent
+  btn.disabled = true
+  btn.textContent = 'Mentés...'
   try {
     const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/team`, {
       method: 'PUT',
@@ -4499,8 +4503,14 @@ document.getElementById('saveTeamBtn').addEventListener('click', async () => {
     })
     if (!res.ok) throw new Error()
     showToast('Csapat mentve')
+    btn.textContent = '✓ Mentve'
+    setTimeout(() => { btn.textContent = originalText; btn.disabled = false }, 1800)
     loadAgents()
-  } catch { showToast('Hiba a csapat mentésekor') }
+  } catch {
+    showToast('Hiba a csapat mentésekor')
+    btn.textContent = originalText
+    btn.disabled = false
+  }
 })
 
 // === Updates page ===
