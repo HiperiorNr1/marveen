@@ -165,6 +165,10 @@ function findAvatarForAgent(name: string): string | null {
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6'
 
+// Canonical memory categories. Kept in sync with the DB CHECK constraint in
+// src/db.ts so the API rejects bad values before they even reach SQLite.
+const MEMORY_CATEGORIES = new Set(['hot', 'warm', 'cold', 'shared'])
+
 // Map short model names to full Claude model IDs (backwards compat with old configs)
 const MODEL_ALIASES: Record<string, string> = {
   'opus': 'claude-opus-4-6',
@@ -462,14 +466,16 @@ A memoria 3 retegbol all (hot/warm/cold) + napi naplo.
 
 ### NINCS MENTAL NOTE! Ha meg kell jegyezni -> AZONNAL mentsd:
 
+Minden /api/* végpont Bearer tokenes: a token a store/.dashboard-token fájlban.
+
 Memória mentés:
-curl -s -X POST http://localhost:3420/api/memories -H "Content-Type: application/json" -d '{"agent_id":"AGENT_NAME","content":"MIT","tier":"TIER","keywords":"kulcsszo1, kulcsszo2"}'
+curl -s -X POST http://localhost:3420/api/memories -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d '{"agent_id":"AGENT_NAME","content":"MIT","category":"CATEGORY","keywords":"kulcsszo1, kulcsszo2"}'
 
 Napi napló (append-only):
-curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: application/json" -d '{"agent_id":"AGENT_NAME","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
+curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d '{"agent_id":"AGENT_NAME","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
-curl -s "http://localhost:3420/api/memories?agent=AGENT_NAME&q=KULCSSZO&tier=warm"
+curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" "http://localhost:3420/api/memories?agent=AGENT_NAME&q=KULCSSZO&category=warm"
 
 ## Ütemezett feladatok
 
@@ -2086,11 +2092,19 @@ Rovid leiras: "${finalPrompt}"`
         const body = await readBody(req)
         const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string }
         if (!data.content?.trim()) return json(res, { error: 'Content is required' }, 400)
-        const tier = data.tier || data.category || 'warm'
+        // `tier` is a deprecated alias kept so pre-ffd19bb agent CLAUDE.md
+        // files (which teach `tier`) keep working. New code should use `category`.
+        if (data.tier && !data.category) {
+          logger.warn({ agent: data.agent_id }, '[DEPRECATED] /api/memories: use "category" instead of "tier"')
+        }
+        const category = (data.category || data.tier || 'warm').toLowerCase()
+        if (!MEMORY_CATEGORIES.has(category)) {
+          return json(res, { error: `Invalid category "${category}". Allowed: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
+        }
         const result = saveAgentMemory(
           data.agent_id || 'marveen',
           data.content.trim(),
-          tier,
+          category,
           data.keywords || undefined,
           true
         )
