@@ -193,6 +193,19 @@ nav { display: flex; gap: 4px; }
 .team-node:hover { border-color: var(--accent); transform: translateY(-1px); }
 .team-node.main { background: var(--accent-soft); border-color: var(--accent); }
 .team-node.leader { border-color: var(--accent); }
+.team-node-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  overflow: hidden;
+  margin-bottom: 8px;
+  background: var(--bg-input);
+}
+.team-node-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 .team-node-name { font-weight: 600; font-size: 14px; color: var(--text); margin-bottom: 2px; }
 .team-node-meta { font-size: 12px; color: var(--text-muted); }
 .team-connector {
@@ -790,6 +803,8 @@ main {
   border-bottom: 1px solid var(--border);
   margin-bottom: 20px;
   padding: 0 24px;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 .tab-btn {
   padding: 12px 16px;
@@ -803,6 +818,7 @@ main {
   border-bottom: 2px solid transparent;
   transition: all var(--transition);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .tab-btn:hover { color: var(--text); }
 .tab-btn.active {

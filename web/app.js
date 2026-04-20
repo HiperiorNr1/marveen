@@ -1117,6 +1117,7 @@ function switchAgentTab(tab) {
   document.getElementById('tabSettings').hidden = tab !== 'settings'
   document.getElementById('tabTelegram').hidden = tab !== 'telegram'
   document.getElementById('tabSkills').hidden = tab !== 'skills'
+  document.getElementById('tabTeam').hidden = tab !== 'team'
 }
 
 // === Settings save buttons ===
@@ -4378,7 +4379,11 @@ function renderTeamGraph(container, data) {
     else if (node.role === 'leader') div.classList.add('leader')
     const roleLabel = node.role === 'main' ? 'főügynök' : (node.role === 'leader' ? 'csapatvezető' : 'beosztott')
     const running = node.running ? '● Fut' : '○ Leállva'
+    const avatarUrl = node.id === mainAgentId
+      ? `/api/marveen/avatar?t=${Date.now()}`
+      : `/api/agents/${encodeURIComponent(node.id)}/avatar?t=${Date.now()}`
     div.innerHTML = `
+      <div class="team-node-avatar"><img src="${avatarUrl}" alt="${escapeHtml(node.label || node.id)}" onerror="this.style.display='none'"></div>
       <div class="team-node-name">${escapeHtml(node.label || node.id)}</div>
       <div class="team-node-meta">${escapeHtml(roleLabel)}</div>
       <div class="team-node-meta">${running}</div>
