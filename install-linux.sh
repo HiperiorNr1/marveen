@@ -308,6 +308,21 @@ read -p "  Telegram bot token (vagy hagyd uresen, kesobb is beallithatod): " BOT
 read -p "  Mi legyen a botod neve? [Marveen]: " BOT_NAME
 BOT_NAME=${BOT_NAME:-"Marveen"}
 
+# Derive the ASCII slug the backend uses everywhere (tmux sessions, systemd
+# unit labels, DB agent_id, API routing). NFKD + ASCII + lowercase dashes,
+# empty fallback to "marveen" so we never end up with a blank identifier.
+MAIN_AGENT_ID=$(python3 - "$BOT_NAME" <<'PYEOF'
+import sys, unicodedata, re
+s = sys.argv[1].strip()
+s = unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode()
+s = re.sub(r'[^a-zA-Z0-9]+', '-', s).strip('-').lower()
+print(s or 'marveen')
+PYEOF
+)
+if [ "$MAIN_AGENT_ID" != "marveen" ]; then
+  echo -e "  ${DIM}Ügynök belső azonosító: ${MAIN_AGENT_ID}${NC}"
+fi
+
 # ─────────────────────────────────────────────
 # [5/7] Fuggosegek telepitese + konfiguracic
 # ─────────────────────────────────────────────
@@ -333,11 +348,12 @@ echo -e "${BOLD}  Konfiguracio letrehozasa...${NC}"
 
 (
   umask 077 && cat >"$INSTALL_DIR/.env" <<ENVEOF
-# Marveen konfiguracio
+# Main agent konfiguracio
 TELEGRAM_BOT_TOKEN=${BOT_TOKEN}
 ALLOWED_CHAT_ID=${CHAT_ID}
 OWNER_NAME=${OWNER_NAME}
 BOT_NAME=${BOT_NAME}
+MAIN_AGENT_ID=${MAIN_AGENT_ID}
 ENVEOF
 )
 chmod 600 "$INSTALL_DIR/.env"
@@ -349,6 +365,7 @@ if [ -f "$INSTALL_DIR/templates/CLAUDE.md.template" ]; then
     -e "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
     -e "s/{{CHAT_ID}}/$CHAT_ID/g" \
     -e "s/{{BOT_NAME}}/$BOT_NAME/g" \
+    -e "s/{{MAIN_AGENT_ID}}/$MAIN_AGENT_ID/g" \
     "$INSTALL_DIR/templates/CLAUDE.md.template" >"$INSTALL_DIR/CLAUDE.md"
   ok "CLAUDE.md generalva"
 fi
@@ -502,11 +519,14 @@ SYSTEMD_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
 
 NODE_PATH="$(which node)"
+DASH_UNIT="${MAIN_AGENT_ID}-dashboard"
+CHAN_UNIT="${MAIN_AGENT_ID}-channels"
+MORN_UNIT="${MAIN_AGENT_ID}-morning"
 
-# marveen-dashboard.service
-cat >"$SYSTEMD_DIR/marveen-dashboard.service" <<EOF
+# ${DASH_UNIT}.service
+cat >"$SYSTEMD_DIR/${DASH_UNIT}.service" <<EOF
 [Unit]
-Description=Marveen Dashboard
+Description=${BOT_NAME} Dashboard
 After=network.target
 
 [Service]
@@ -524,10 +544,10 @@ Environment=HOME=$HOME
 WantedBy=default.target
 EOF
 
-# marveen-channels.service
-cat >"$SYSTEMD_DIR/marveen-channels.service" <<EOF
+# ${CHAN_UNIT}.service
+cat >"$SYSTEMD_DIR/${CHAN_UNIT}.service" <<EOF
 [Unit]
-Description=Marveen Channels (Telegram bridge)
+Description=${BOT_NAME} Channels (Telegram bridge)
 After=network.target
 
 [Service]
@@ -548,10 +568,10 @@ Environment=LANG=${LANG:-en_US.UTF-8}
 WantedBy=default.target
 EOF
 
-# marveen-morning.service (a timer hivja)
-cat >"$SYSTEMD_DIR/marveen-morning.service" <<EOF
+# ${MORN_UNIT}.service (a timer hivja)
+cat >"$SYSTEMD_DIR/${MORN_UNIT}.service" <<EOF
 [Unit]
-Description=Marveen Reggeli Napindito
+Description=${BOT_NAME} Reggeli Napindito
 
 [Service]
 Type=oneshot
@@ -561,11 +581,11 @@ Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 EOF
 
-# marveen-morning.timer
-cat >"$SYSTEMD_DIR/marveen-morning.timer" <<EOF
+# ${MORN_UNIT}.timer
+cat >"$SYSTEMD_DIR/${MORN_UNIT}.timer" <<EOF
 [Unit]
-Description=Marveen Reggeli Napindito Timer
-Requires=marveen-morning.service
+Description=${BOT_NAME} Reggeli Napindito Timer
+Requires=${MORN_UNIT}.service
 
 [Timer]
 OnCalendar=*-*-* 07:27:00
@@ -596,16 +616,16 @@ fi
 
 # 3. daemon-reload + enable
 systemctl --user daemon-reload
-systemctl --user enable marveen-dashboard marveen-channels marveen-morning.timer 2>/dev/null || true
+systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${MORN_UNIT}.timer" 2>/dev/null || true
 ok "systemd unitok generalva es engedelyezve"
 
 # 4. Inditás
-systemctl --user start marveen-dashboard marveen-channels 2>/dev/null || true
+systemctl --user start "${DASH_UNIT}" "${CHAN_UNIT}" 2>/dev/null || true
 
 # 5. Allapotellenorzes (rovid varakozas utan)
 sleep 2
 SVCFAIL=0
-for svc in marveen-dashboard marveen-channels; do
+for svc in "${DASH_UNIT}" "${CHAN_UNIT}"; do
   if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
     ok "$svc fut"
   else
@@ -628,7 +648,7 @@ fi
 if ! claude plugin list 2>/dev/null | grep -q telegram; then
   echo -e "  ${RED}✗${NC} Telegram plugin nincs telepitve."
   echo -e "  ${BOLD}Javitas:${NC} claude plugin install telegram@claude-plugins-official"
-  echo -e "  ${DIM}Utana: systemctl --user restart marveen-channels${NC}"
+  echo -e "  ${DIM}Utana: systemctl --user restart ${CHAN_UNIT}${NC}"
 else
   ok "Telegram plugin ellenorizve"
 fi
@@ -647,7 +667,7 @@ if [ -n "$BOT_TOKEN" ]; then
   echo -e "  Varakozas a Telegram bridge elindulasara..."
   BRIDGE_OK=false
   for i in $(seq 1 15); do
-    if systemctl --user is-active --quiet marveen-channels 2>/dev/null; then
+    if systemctl --user is-active --quiet "${CHAN_UNIT}" 2>/dev/null; then
       BRIDGE_OK=true
       break
     fi
@@ -655,9 +675,9 @@ if [ -n "$BOT_TOKEN" ]; then
   done
 
   if [ "$BRIDGE_OK" = "false" ]; then
-    warn "A marveen-channels service nem indult el. Parositas kihagyva."
-    echo -e "  ${DIM}Ellenorizd: journalctl --user -u marveen-channels -n 30${NC}"
-    echo -e "  ${DIM}Kesobb: systemctl --user start marveen-channels, majd irj a botodnak${NC}"
+    warn "A ${CHAN_UNIT} service nem indult el. Parositas kihagyva."
+    echo -e "  ${DIM}Ellenorizd: journalctl --user -u ${CHAN_UNIT} -n 30${NC}"
+    echo -e "  ${DIM}Kesobb: systemctl --user start ${CHAN_UNIT}, majd irj a botodnak${NC}"
   else
     ok "Telegram bridge fut"
     echo ""
@@ -700,8 +720,8 @@ with open('$ACCESS_FILE', 'w') as f:
           ok "Parositas sikeres! (chat ID: $PENDING_CHAT_ID)"
           ok "Policy: allowlist (csak te erheted el a botot)"
           # Ujrainditjuk, hogy felvegye az uj access.json-t
-          systemctl --user restart marveen-channels 2>/dev/null || true
-          ok "marveen-channels ujraindítva (uj konfig betoltve)"
+          systemctl --user restart "${CHAN_UNIT}" 2>/dev/null || true
+          ok "${CHAN_UNIT} ujraindítva (uj konfig betoltve)"
         else
           warn "A kod nem talalhato az access.json pending bejegyzesei kozott."
           echo -e "  ${DIM}Lehetseges okok:${NC}"
@@ -761,9 +781,9 @@ echo -e "  ${DIM}2. Irj a botodnak Telegramon -- mar valaszolnia kell${NC}"
 echo -e "  ${DIM}3. A Csapat oldalon hozhatsz letre tobb agenst${NC}"
 echo ""
 echo -e "  ${DIM}Hasznos parancsok:${NC}"
-echo -e "  ${DIM}  systemctl --user status marveen-dashboard marveen-channels --no-pager${NC}"
-echo -e "  ${DIM}  journalctl --user -u marveen-dashboard -f${NC}    -- dashboard logok"
-echo -e "  ${DIM}  journalctl --user -u marveen-channels -f${NC}     -- channels logok"
+echo -e "  ${DIM}  systemctl --user status ${DASH_UNIT} ${CHAN_UNIT} --no-pager${NC}"
+echo -e "  ${DIM}  journalctl --user -u ${DASH_UNIT} -f${NC}    -- dashboard logok"
+echo -e "  ${DIM}  journalctl --user -u ${CHAN_UNIT} -f${NC}     -- channels logok"
 echo -e "  ${DIM}  ./update.sh${NC}                                  -- frissites"
 echo -e "  ${DIM}  ./scripts/start.sh${NC}                           -- indítás"
 echo -e "  ${DIM}  ./scripts/stop.sh${NC}                            -- leallitas"
