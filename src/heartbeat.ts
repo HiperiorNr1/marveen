@@ -5,6 +5,7 @@ import {
   HEARTBEAT_END_HOUR,
   HEARTBEAT_CALENDAR_ID,
   STORE_DIR,
+  OWNER_NAME,
 } from './config.js'
 import { getHeartbeatKanbanSummary, getActiveScheduledTaskCount } from './db.js'
 import { getCalendarEvents, type CalendarEvent } from './google-api.js'
@@ -110,7 +111,7 @@ function buildAgentPrompt(data: HeartbeatData): string {
   // attacker-controlled strings (calendar/kanban/email titles) appear.
   let prompt = UNTRUSTED_PREAMBLE + '\n'
   prompt += `Heartbeat ellenorzes -- ${timeStr}\n\n`
-  prompt += `Az alabbi adatokat gyujtottem nativ modon (API/DB). Fogalmazz tomor, emberi osszefoglalot Szabolcsnak.\n`
+  prompt += `Az alabbi adatokat gyujtottem nativ modon (API/DB). Fogalmazz tomor, emberi osszefoglalot ${OWNER_NAME}-nak.\n`
   prompt += `FONTOS: Nezd meg az emaileket is MCP-n keresztul (search_emails, utolso 2 ora, olvasatlanok).\n`
   prompt += `Hasznald a HEARTBEAT.md formatumot.\n\n`
 
