@@ -92,6 +92,7 @@ interface AgentSummary {
   description: string
   model: string
   securityProfile: string
+  team: TeamConfig
   hasTelegram: boolean
   telegramBotUsername?: string
   status: 'configured' | 'draft'
@@ -377,8 +378,99 @@ function resolveProfilePlaceholders(value: string, ctx: { HOME: string; AGENT_DI
     .replace(/\$\{WORKDIR\}/g, ctx.AGENT_DIR)
 }
 
+// --- Team / hierarchy ---
+//
+// Pure convenience feature: each agent can declare its role (leader | member),
+// who it reports to, who it delegates to, and whether it's allowed to split a
+// task by itself. No security implications, just routing + visualization for
+// multi-tier agent setups.
+
+interface TeamConfig {
+  role: 'leader' | 'member'
+  reportsTo: string | null
+  delegatesTo: string[]
+  autoDelegation: boolean
+}
+
+const DEFAULT_TEAM: TeamConfig = {
+  role: 'member',
+  reportsTo: null,
+  delegatesTo: [],
+  autoDelegation: false,
+}
+
+function readAgentTeam(name: string): TeamConfig {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    const raw = config.team
+    if (raw && typeof raw === 'object') {
+      const role = raw.role === 'leader' ? 'leader' : 'member'
+      const reportsTo = typeof raw.reportsTo === 'string' && raw.reportsTo.trim() ? raw.reportsTo.trim() : null
+      const delegatesTo = Array.isArray(raw.delegatesTo) ? raw.delegatesTo.filter((x: unknown) => typeof x === 'string') : []
+      const autoDelegation = !!raw.autoDelegation
+      return { role, reportsTo, delegatesTo, autoDelegation }
+    }
+  } catch { /* fall through */ }
+  return { ...DEFAULT_TEAM }
+}
+
+function writeAgentTeam(name: string, team: TeamConfig): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
+  config.team = team
+  writeFileSync(configPath, JSON.stringify(config, null, 2))
+}
+
+// Removing an agent leaves dangling references in other agents' team configs.
+// Call this from the DELETE handler: members who reported to the removed leader
+// fall back to the main agent, and anyone who delegated to them drops the id.
+function cleanupTeamReferences(removedName: string): void {
+  for (const other of listAgentNames()) {
+    const team = readAgentTeam(other)
+    let dirty = false
+    if (team.reportsTo === removedName) {
+      team.reportsTo = removedName === MAIN_AGENT_ID ? null : MAIN_AGENT_ID
+      dirty = true
+    }
+    const filtered = team.delegatesTo.filter(n => n !== removedName)
+    if (filtered.length !== team.delegatesTo.length) {
+      team.delegatesTo = filtered
+      dirty = true
+    }
+    if (dirty) writeAgentTeam(other, team)
+  }
+}
+
 // Merges the profile's allow/deny entries into agents/<name>/.claude/settings.json,
 // preserving any other keys (hooks, custom flags) the user added by hand.
+// Idempotent migration: every agent's settings.json should carry the
+// PreCompact hook (memory save + skill reflection). Pre-refactor agents
+// were scaffolded before scaffoldAgentDir seeded the template, so their
+// file is permissions-only. Merge the template's hooks block in place.
+function ensureAgentHooks(name: string): boolean {
+  const settingsPath = join(agentDir(name), '.claude', 'settings.json')
+  const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
+  if (!existsSync(tplPath)) return false
+  let tpl: Record<string, unknown>
+  try {
+    tpl = JSON.parse(readFileSync(tplPath, 'utf-8'))
+  } catch {
+    return false
+  }
+  if (!tpl.hooks) return false
+  let existing: Record<string, unknown> = {}
+  if (existsSync(settingsPath)) {
+    try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
+  }
+  if (existing.hooks) return false  // user already has hooks, leave alone
+  existing.hooks = tpl.hooks
+  mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
+  writeFileSync(settingsPath, JSON.stringify(existing, null, 2))
+  return true
+}
+
 function writeAgentSettingsFromProfile(name: string, profile: ProfileTemplate): void {
   const agentRoot = agentDir(name)
   const settingsDir = join(agentRoot, '.claude')
@@ -453,6 +545,7 @@ function getAgentSummary(name: string): AgentSummary {
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
     securityProfile: readAgentSecurityProfile(name),
+    team: readAgentTeam(name),
     hasTelegram: tg.hasTelegram,
     telegramBotUsername: tg.botUsername,
     status: hasClaudeMd && hasSoulMd ? 'configured' : 'draft',
@@ -554,7 +647,12 @@ function startAgentProcess(name: string): { ok: boolean; pid?: number; error?: s
     const skipFlag = profile.permissionMode === 'strict' ? '' : '--dangerously-skip-permissions '
     // bun lives under ~/.bun/bin, which isn't in the dashboard's launchd PATH.
     // The Claude plugin launcher spawns `bun`, so we must prepend it here.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && export TELEGRAM_STATE_DIR="${tgStateDir}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} ${skipFlag}--model ${model} --channels plugin:telegram@claude-plugins-official`
+    // Defensive unset of TELEGRAM_BOT_TOKEN: if anything ever pollutes the
+    // tmux server's global env again (fresh upgrades, operator manually
+    // sourcing .env), the sub-agent would otherwise inherit the main
+    // agent's token and trigger a 409 Conflict loop. The per-agent .env
+    // in TELEGRAM_STATE_DIR is still the intended source of truth.
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && unset TELEGRAM_BOT_TOKEN && export TELEGRAM_STATE_DIR="${tgStateDir}" && ${ollamaEnv}cd "${dir}" && ${CLAUDE} ${skipFlag}--model ${model} --channels plugin:telegram@claude-plugins-official`
     execSync(
       `${TMUX} new-session -d -s ${session} "${cmd}"`,
       { timeout: 10000 }
@@ -576,6 +674,23 @@ function stopAgentProcess(name: string): { ok: boolean; error?: string } {
     execSync(`${TMUX} kill-session -t ${session}`, { timeout: 5000 })
     // Wait for session to fully terminate
     execSync('sleep 2', { timeout: 4000 })
+    // Reap any orphaned bun server.ts (Telegram plugin) grandchildren that
+    // tmux didn't get. The plugin writes its pid to the agent's telegram
+    // state dir; prefer that, fall back to a token-scoped pkill.
+    try {
+      const pidPath = join(agentDir(name), '.claude', 'channels', 'telegram', 'bot.pid')
+      if (existsSync(pidPath)) {
+        const pid = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10)
+        if (pid > 1) {
+          try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+        }
+      }
+      // Belt-and-braces: nuke any bun server.ts whose cwd points at this
+      // agent's telegram state dir. Narrow match so other agents' pollers
+      // aren't hit.
+      const tgStateDir = join(agentDir(name), '.claude', 'channels', 'telegram')
+      execFileSync('/usr/bin/pkill', ['-f', `TELEGRAM_STATE_DIR=${tgStateDir}`], { timeout: 3000 })
+    } catch { /* pkill returns non-zero if no match -- fine */ }
     logger.info({ name, session }, 'Agent tmux session stopped')
     return { ok: true }
   } catch (err) {
@@ -610,8 +725,17 @@ function scaffoldAgentDir(name: string) {
     if (existsSync(sharedMcp)) {
       copyFileSync(sharedMcp, mcpJson)
     } else {
-      writeFileSync(mcpJson, '{}')
+      // Valid empty shape -- `claude /doctor` rejects plain "{}"
+      writeFileSync(mcpJson, JSON.stringify({ mcpServers: {} }, null, 2))
     }
+  }
+  // Seed settings.json from template so the agent gets the PreCompact
+  // hook (memory save + skill reflection) out of the box. Only if the
+  // file doesn't exist yet -- user edits and later profile writes stay.
+  const settingsJson = join(dir, '.claude', 'settings.json')
+  if (!existsSync(settingsJson)) {
+    const tpl = join(PROJECT_ROOT, 'templates', 'settings.json.template')
+    if (existsSync(tpl)) copyFileSync(tpl, settingsJson)
   }
 }
 
@@ -1317,6 +1441,79 @@ function startTelegramPluginMonitor(): NodeJS.Timeout {
 
 const scheduleLastRun: Map<string, number> = new Map()
 
+// Persistent task run history so the overview's "tasksToday" number survives
+// dashboard restarts. Keep the last 30 days.
+const TASK_HISTORY_PATH = join(PROJECT_ROOT, 'store', 'task-run-history.json')
+const TASK_HISTORY_TTL = 30 * 24 * 60 * 60 * 1000
+interface TaskRunEntry { name: string; agent: string; ts: number }
+function readTaskHistory(): TaskRunEntry[] {
+  try {
+    const raw = readFileSync(TASK_HISTORY_PATH, 'utf-8')
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return []
+    return arr
+  } catch {
+    return []
+  }
+}
+// Count "real" user turns (operator prompts, Telegram messages) in every
+// Claude Code session JSONL under ~/.claude/projects/. Filters out
+// tool_result, local-command, and synthetic system events so a task-heavy
+// hour doesn't inflate the counter.
+function countUserTurns(fromMs: number, toMs: number = Number.POSITIVE_INFINITY): number {
+  const root = join(homedir(), '.claude', 'projects')
+  if (!existsSync(root)) return 0
+  let total = 0
+  try {
+    for (const projectDir of readdirSync(root)) {
+      const absDir = join(root, projectDir)
+      let stat: ReturnType<typeof statSync>
+      try { stat = statSync(absDir) } catch { continue }
+      if (!stat.isDirectory()) continue
+      for (const fname of readdirSync(absDir)) {
+        if (!fname.endsWith('.jsonl')) continue
+        const absFile = join(absDir, fname)
+        let fstat: ReturnType<typeof statSync>
+        try { fstat = statSync(absFile) } catch { continue }
+        if (fstat.mtimeMs < fromMs) continue  // nothing modified in window
+        try {
+          const data = readFileSync(absFile, 'utf-8')
+          for (const line of data.split('\n')) {
+            if (!line) continue
+            let e: any
+            try { e = JSON.parse(line) } catch { continue }
+            if (e.type !== 'user' || e.isMeta) continue
+            const ts = e.timestamp ? Date.parse(e.timestamp) : 0
+            if (!ts || ts < fromMs || ts >= toMs) continue
+            const content = e.message?.content
+            if (typeof content === 'string') {
+              if (content.startsWith('<local-command') || content.startsWith('<command-name>')) continue
+              total++
+            } else if (Array.isArray(content)) {
+              const hasToolResult = content.some((b: any) => b && b.type === 'tool_result')
+              if (hasToolResult) continue
+              total++
+            }
+          }
+        } catch { /* skip unreadable file */ }
+      }
+    }
+  } catch { /* ignore */ }
+  return total
+}
+
+function appendTaskRun(name: string, agent: string): void {
+  const now = Date.now()
+  const history = readTaskHistory().filter(e => now - e.ts < TASK_HISTORY_TTL)
+  history.push({ name, agent, ts: now })
+  try {
+    mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
+    writeFileSync(TASK_HISTORY_PATH, JSON.stringify(history))
+  } catch (err) {
+    logger.warn({ err }, 'Failed to persist task run history')
+  }
+}
+
 function cronMatchesNow(cron: string, catchUpMs: number = 60000): boolean {
   try {
     const expr = CronExpressionParser.parse(cron)
@@ -1358,10 +1555,141 @@ function isSessionReadyForPrompt(session: string): boolean {
     const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
     const hasIdleFooter = /bypass permissions on \(shift\+tab to cycle\)/.test(pane)
     const hasPendingPaste = /\[Pasted text #\d+/.test(pane)
-    return hasIdleFooter && !hasPendingPaste
+    if (!hasIdleFooter || hasPendingPaste) return false
+    // Also guard against text already parked in the input buffer: when our
+    // chunk+delay send-keys lands while the agent is mid-turn, the bytes
+    // just sit in the ❯ input line (no "Pasted text" marker because we
+    // didn't paste -- we typed). If we don't notice that, the next
+    // scheduled prompt gets appended to the first one and both silent-fail.
+    // Heuristic: look at the 20 lines just above the footer, find the
+    // input-prompt line (starts with "❯ "), and consider the session busy
+    // if anything non-whitespace follows the ❯.
+    const lines = pane.split('\n')
+    const footerIdx = lines.findIndex(l => /bypass permissions on \(shift\+tab to cycle\)/.test(l))
+    const start = Math.max(0, footerIdx - 20)
+    const slice = lines.slice(start, footerIdx === -1 ? undefined : footerIdx).join('\n')
+    if (/❯\s+\S/.test(slice)) return false
+    return true
   } catch {
     return false
   }
+}
+
+// --- Update checker ---
+// Polls the GitHub repo's main branch for new commits and compares to the
+// local HEAD. Lets the dashboard show a "new version available" badge
+// without anyone having to SSH in and run update.sh.
+
+interface UpdateCommit {
+  sha: string
+  short: string
+  message: string
+  author: string
+  date: string
+}
+
+interface UpdateStatus {
+  current: string
+  latest: string
+  behind: number
+  commits: UpdateCommit[]
+  remote: string
+  lastChecked: number
+  error?: string
+}
+
+let updateStatusCache: UpdateStatus = {
+  current: '',
+  latest: '',
+  behind: 0,
+  commits: [],
+  remote: 'Szotasz/marveen',
+  lastChecked: 0,
+}
+
+function currentGitHead(): string {
+  try {
+    return execFileSync('/usr/bin/git', ['rev-parse', 'HEAD'], { cwd: PROJECT_ROOT, timeout: 3000, encoding: 'utf-8' }).trim()
+  } catch {
+    return ''
+  }
+}
+
+function parseGitHubRemote(): string {
+  try {
+    const url = execFileSync('/usr/bin/git', ['config', '--get', 'remote.origin.url'], { cwd: PROJECT_ROOT, timeout: 3000, encoding: 'utf-8' }).trim()
+    // Normalize "git@github.com:Owner/Repo.git" or "https://github.com/Owner/Repo.git" to "Owner/Repo"
+    const m = url.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/i)
+    if (m) return m[1]
+  } catch { /* fall through */ }
+  return 'Szotasz/marveen'
+}
+
+async function refreshUpdateStatus(): Promise<UpdateStatus> {
+  const current = currentGitHead()
+  const remote = parseGitHubRemote()
+  const status: UpdateStatus = {
+    current,
+    latest: '',
+    behind: 0,
+    commits: [],
+    remote,
+    lastChecked: Date.now(),
+  }
+  if (!current) {
+    status.error = 'Not a git checkout'
+    updateStatusCache = status
+    return status
+  }
+  try {
+    // 1) find HEAD of default branch (main) via the commits endpoint
+    const latestRes = await fetch(`https://api.github.com/repos/${remote}/commits/main`, {
+      headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'marveen-update-check' },
+    })
+    if (!latestRes.ok) throw new Error(`GitHub /commits/main -> ${latestRes.status}`)
+    const latestJson = await latestRes.json() as { sha?: string }
+    if (!latestJson.sha) throw new Error('No sha on commits/main response')
+    status.latest = latestJson.sha
+
+    if (status.latest === current) {
+      updateStatusCache = status
+      return status
+    }
+
+    // 2) list commits between current and latest via the compare endpoint
+    const cmpRes = await fetch(`https://api.github.com/repos/${remote}/compare/${current}...${status.latest}`, {
+      headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'marveen-update-check' },
+    })
+    if (cmpRes.ok) {
+      const cmp = await cmpRes.json() as {
+        ahead_by?: number
+        commits?: { sha: string; commit: { message: string; author: { name: string; date: string } } }[]
+      }
+      status.behind = cmp.ahead_by ?? 0
+      // GitHub returns commits oldest-first; flip to newest-first for the UI.
+      const raw = (cmp.commits ?? []).slice().reverse()
+      status.commits = raw.map(c => ({
+        sha: c.sha,
+        short: c.sha.slice(0, 7),
+        message: (c.commit.message || '').split('\n')[0],
+        author: c.commit.author?.name || '',
+        date: c.commit.author?.date || '',
+      }))
+    } else if (cmpRes.status === 404) {
+      // Local HEAD not on the remote (detached local commit / different base).
+      status.error = 'Local HEAD not found on GitHub -- different fork or unpushed commits?'
+    }
+  } catch (err) {
+    status.error = err instanceof Error ? err.message : String(err)
+  }
+  updateStatusCache = status
+  return status
+}
+
+function startUpdateChecker(): NodeJS.Timeout {
+  // First check shortly after startup; then every 15 minutes.
+  setTimeout(() => { refreshUpdateStatus().catch(() => {}) }, 10_000)
+  return setInterval(() => { refreshUpdateStatus().catch(() => {}) }, 15 * 60_000)
 }
 
 function startScheduleRunner(): NodeJS.Timeout {
@@ -1424,7 +1752,35 @@ function startScheduleRunner(): NodeJS.Timeout {
         }
         sendPromptToSession(session, prefix + task.prompt)
         scheduleLastRun.set(task.name, now)
+        appendTaskRun(task.name, agentName)
         logger.info({ task: task.name, agent: agentName, session }, 'Scheduled task fired')
+
+        // Post-send verify: if the agent started a new turn during our
+        // chunk stream, the Enter from sendPromptToSession might have
+        // landed while the agent was thinking and Claude Code parked
+        // the bytes on the input line. We want the prompt to run, not
+        // disappear -- so if the pane still shows our marker below ❯
+        // after a short wait, re-send Enter so the submit sticks. We
+        // retry a couple of times before giving up.
+        const marker = task.type === 'heartbeat'
+          ? `[Heartbeat: ${task.name}]`
+          : `[Utemezett feladat: ${task.name}]`
+        const resubmit = (attempt: number) => {
+          try {
+            const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+            const stuck = /❯\s+\S/.test(pane) && pane.includes(marker)
+            if (!stuck) return  // either submitted or cleared
+            if (attempt >= 5) {
+              logger.warn({ task: task.name, session }, 'Scheduled prompt still stuck after 5 Enter retries -- giving up, will retry on next cron tick')
+              return
+            }
+            execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
+            setTimeout(() => resubmit(attempt + 1), 3000)
+          } catch (err) {
+            logger.warn({ err, task: task.name }, 'Post-send resubmit failed')
+          }
+        }
+        setTimeout(() => resubmit(0), 2000)
       } catch (err) {
         logger.warn({ err, task: task.name }, 'Failed to fire scheduled task')
       }
@@ -1647,7 +2003,22 @@ export function startWebServer(port = 3420): http.Server {
         // Send welcome message via the new bot
         sendWelcomeMessage(name, botToken.trim()).catch(() => {})
 
-        return json(res, { ok: true, botUsername: validation.botUsername, botId: validation.botId })
+        // If the agent is running, the already-started bun poller is still
+        // using the OLD token. Restart it so the new token actually goes
+        // live; otherwise the user sees "Kapcsolat rendben!" but the agent
+        // never receives messages.
+        const wasRunning = isAgentRunning(name)
+        let restarted = false
+        if (wasRunning) {
+          const stopRes = stopAgentProcess(name)
+          if (stopRes.ok) {
+            try { execSync('sleep 2', { timeout: 4000 }) } catch {}
+            const startRes = startAgentProcess(name)
+            restarted = startRes.ok
+          }
+        }
+
+        return json(res, { ok: true, botUsername: validation.botUsername, botId: validation.botId, restarted, wasRunning })
       }
 
       // DELETE /api/agents/:name/telegram - Remove Telegram config
@@ -1660,6 +2031,134 @@ export function startWebServer(port = 3420): http.Server {
         if (existsSync(envFile)) unlinkSync(envFile)
         if (existsSync(accessFile)) unlinkSync(accessFile)
         return json(res, { ok: true })
+      }
+
+      // GET /api/overview - numbers + activity for the dashboard home.
+      if (path === '/api/overview' && method === 'GET') {
+        // Agents count (main + sub) + running
+        const subAgents = listAgentNames()
+        const running = subAgents.filter(n => isAgentRunning(n)).length + 1  // +main
+        const total = subAgents.length + 1
+        // Memory count + category breakdown
+        const db0 = getDb()
+        const memStats = db0.prepare("SELECT COUNT(*) as c FROM memories").get() as { c: number }
+        const memCats = db0.prepare("SELECT COUNT(DISTINCT category) as c FROM memories").get() as { c: number }
+        // Task runs: read the persisted history so the number survives
+        // dashboard restarts (the in-memory scheduleLastRun map empties on
+        // every reload). Add user-initiated turns from the Claude Code
+        // session JSONLs on top, so prompts the operator sends over
+        // Telegram count the same as cron tasks.
+        const startOfDay = new Date()
+        startOfDay.setHours(0, 0, 0, 0)
+        const startTs = startOfDay.getTime()
+        const taskHistory = readTaskHistory()
+        const schedToday = taskHistory.filter(e => e.ts >= startTs).length
+        const yesterday = startTs - 24 * 60 * 60 * 1000
+        const schedYesterday = taskHistory.filter(e => e.ts >= yesterday && e.ts < startTs).length
+        const userTurns = countUserTurns(startTs)
+        const userTurnsPrev = countUserTurns(yesterday, startTs)
+        const tasksToday = schedToday + userTurns
+        const tasksYesterday = schedYesterday + userTurnsPrev
+        // Skills count: global ~/.claude/skills/ directories with SKILL.md
+        let skillCount = 0
+        let skillsToday = 0
+        const skillsDir = join(homedir(), '.claude', 'skills')
+        if (existsSync(skillsDir)) {
+          for (const entry of readdirSync(skillsDir)) {
+            const skillFile = join(skillsDir, entry, 'SKILL.md')
+            if (existsSync(skillFile)) {
+              skillCount++
+              try {
+                const mtime = statSync(skillFile).mtimeMs
+                if (mtime >= startTs) skillsToday++
+              } catch { /* ignore */ }
+            }
+          }
+        }
+        // Activity: last 8 memory/daily-log/agent_messages events
+        const activity: Array<{ icon: string; text: string; at: number }> = []
+        try {
+          const memRows = db0.prepare("SELECT content, created_at, agent_id FROM memories ORDER BY created_at DESC LIMIT 6").all() as { content: string; created_at: number; agent_id: string }[]
+          for (const r of memRows) {
+            activity.push({
+              icon: 'memory',
+              text: `${r.agent_id}: ${r.content.slice(0, 80)}${r.content.length > 80 ? '…' : ''}`,
+              at: r.created_at * 1000,
+            })
+          }
+        } catch { /* ignore */ }
+        try {
+          const msgRows = db0.prepare("SELECT from_agent, to_agent, content, created_at FROM agent_messages ORDER BY created_at DESC LIMIT 4").all() as { from_agent: string; to_agent: string; content: string; created_at: number }[]
+          for (const r of msgRows) {
+            activity.push({
+              icon: 'delegate',
+              text: `${r.from_agent} → ${r.to_agent}: ${r.content.slice(0, 60)}${r.content.length > 60 ? '…' : ''}`,
+              at: r.created_at * 1000,
+            })
+          }
+        } catch { /* ignore */ }
+        activity.sort((a, b) => b.at - a.at)
+        // Agents for the team card: main + sub-agents with avatar path, role, running
+        const agentsForTeam: Array<{ id: string; label: string; role: string; running: boolean; hasAvatar: boolean; avatarUrl: string }> = []
+        const mainHasAvatar = [
+          join(PROJECT_ROOT, 'store', 'marveen-avatar.png'),
+          join(PROJECT_ROOT, 'store', 'marveen-avatar.jpg'),
+        ].some(existsSync)
+        agentsForTeam.push({
+          id: MAIN_AGENT_ID,
+          label: BOT_NAME,
+          role: 'main',
+          running: true,
+          hasAvatar: mainHasAvatar,
+          avatarUrl: `/api/marveen/avatar`,
+        })
+        for (const a of subAgents) {
+          const team = readAgentTeam(a)
+          agentsForTeam.push({
+            id: a,
+            label: readAgentDisplayName(a),
+            role: team.role,
+            running: isAgentRunning(a),
+            hasAvatar: existsSync(join(agentDir(a), 'avatar.png')),
+            avatarUrl: `/api/agents/${encodeURIComponent(a)}/avatar`,
+          })
+        }
+        return json(res, {
+          agents: { total, running },
+          tasksToday,
+          tasksYesterday,
+          memories: { count: memStats.c, categories: memCats.c },
+          skills: { count: skillCount, today: skillsToday },
+          team: agentsForTeam,
+          activity: activity.slice(0, 8),
+        })
+      }
+
+      // GET /api/updates - current vs GitHub main, with commit list between
+      if (path === '/api/updates' && method === 'GET') {
+        return json(res, updateStatusCache)
+      }
+
+      // POST /api/updates/check - force an immediate refresh
+      if (path === '/api/updates/check' && method === 'POST') {
+        const status = await refreshUpdateStatus()
+        return json(res, status)
+      }
+
+      // POST /api/updates/apply - spawn update.sh in the background.
+      // The script restarts the dashboard itself, so we reply immediately
+      // and the browser reloads after a short delay.
+      if (path === '/api/updates/apply' && method === 'POST') {
+        try {
+          spawn('/bin/bash', [join(PROJECT_ROOT, 'update.sh')], {
+            cwd: PROJECT_ROOT,
+            detached: true,
+            stdio: 'ignore',
+          }).unref()
+          return json(res, { ok: true })
+        } catch (err) {
+          return json(res, { error: err instanceof Error ? err.message : String(err) }, 500)
+        }
       }
 
       // GET /api/profiles - list available security profile templates
@@ -1706,6 +2205,81 @@ export function startWebServer(port = 3420): http.Server {
         writeAgentSecurityProfile(name, requested)
         writeAgentSettingsFromProfile(name, profile)
         return json(res, { ok: true, requiresRestart: isAgentRunning(name) })
+      }
+
+      // GET /api/team/graph - simple hierarchy graph for the dashboard's
+      // Csapat view. Nodes include main + every sub-agent with label, role,
+      // reportsTo, delegatesTo. Edges are derived from reportsTo.
+      if (path === '/api/team/graph' && method === 'GET') {
+        const nodes: Array<{
+          id: string
+          label: string
+          role: 'main' | 'leader' | 'member'
+          reportsTo: string | null
+          delegatesTo: string[]
+          running?: boolean
+          securityProfile?: string
+        }> = []
+        nodes.push({
+          id: MAIN_AGENT_ID,
+          label: BOT_NAME,
+          role: 'main',
+          reportsTo: null,
+          delegatesTo: [],
+          running: true,
+        })
+        for (const agentName of listAgentNames()) {
+          const team = readAgentTeam(agentName)
+          nodes.push({
+            id: agentName,
+            label: readAgentDisplayName(agentName),
+            role: team.role,
+            reportsTo: team.reportsTo,
+            delegatesTo: team.delegatesTo,
+            running: isAgentRunning(agentName),
+            securityProfile: readAgentSecurityProfile(agentName),
+          })
+        }
+        const knownIds = new Set(nodes.map(n => n.id))
+        const edges: Array<{ from: string; to: string }> = []
+        for (const n of nodes) {
+          // Members who don't explicitly report anywhere fall under the main
+          // agent in the UI so the graph has a single root.
+          const reports = n.reportsTo && knownIds.has(n.reportsTo)
+            ? n.reportsTo
+            : (n.id === MAIN_AGENT_ID ? null : MAIN_AGENT_ID)
+          if (reports) edges.push({ from: reports, to: n.id })
+        }
+        return json(res, { nodes, edges, mainAgentId: MAIN_AGENT_ID })
+      }
+
+      // GET /api/agents/:name/team - read team config
+      const teamMatch = path.match(/^\/api\/agents\/([^/]+)\/team$/)
+      if (teamMatch && method === 'GET') {
+        const name = decodeURIComponent(teamMatch[1])
+        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
+        return json(res, readAgentTeam(name))
+      }
+
+      // PUT /api/agents/:name/team - update team config
+      if (teamMatch && method === 'PUT') {
+        const name = decodeURIComponent(teamMatch[1])
+        if (!existsSync(agentDir(name))) return json(res, { error: 'Agent not found' }, 404)
+        const body = await readBody(req)
+        const data = JSON.parse(body.toString())
+        const current = readAgentTeam(name)
+        const next: TeamConfig = {
+          role: data.role === 'leader' ? 'leader' : (data.role === 'member' ? 'member' : current.role),
+          reportsTo: typeof data.reportsTo === 'string'
+            ? (data.reportsTo.trim() || null)
+            : (data.reportsTo === null ? null : current.reportsTo),
+          delegatesTo: Array.isArray(data.delegatesTo)
+            ? data.delegatesTo.filter((x: unknown) => typeof x === 'string')
+            : current.delegatesTo,
+          autoDelegation: typeof data.autoDelegation === 'boolean' ? data.autoDelegation : current.autoDelegation,
+        }
+        writeAgentTeam(name, next)
+        return json(res, { ok: true, team: next })
       }
 
       // GET /api/agents/:name/telegram/pending - List pending pairing codes.
@@ -1770,6 +2344,11 @@ export function startWebServer(port = 3420): http.Server {
 
           // Remove from pending
           delete access.pending[code.trim()]
+
+          // Pairing is one-shot; lock the channel down to allowlist mode
+          // now that we have the sender's id. Matches what install.sh does
+          // for the main agent after the first pairing completes.
+          access.dmPolicy = 'allowlist'
 
           // Save updated access.json
           writeFileSync(accessPath, JSON.stringify(access, null, 2))
@@ -1930,6 +2509,9 @@ export function startWebServer(port = 3420): http.Server {
         const dir = agentDir(name)
         if (!existsSync(dir)) return json(res, { error: 'Agent not found' }, 404)
         rmSync(dir, { recursive: true, force: true })
+        // Fix up other agents' team refs so we don't leave dangling reportsTo /
+        // delegatesTo entries pointing at a now-deleted agent.
+        cleanupTeamReferences(name)
         return json(res, { ok: true })
       }
 
@@ -2614,58 +3196,86 @@ Respond ONLY with JSON, nothing else:
 
       // === MCP Connectors API ===
 
-      // GET /api/connectors - List all MCP servers with status
+      // GET /api/connectors - List all MCP servers with status.
+      // We deliberately DON'T shell out to `claude mcp list` here: that
+      // command spawns every stdio MCP (including plugin:telegram) for a
+      // health check, which collides with the Telegram bot's single-poller
+      // requirement and drops the live marveen-channels plugin. Instead we
+      // read the config files directly -- no process spawn, no interference.
       if (path === '/api/connectors' && method === 'GET') {
+        const connectors: Array<{ name: string; status: string; endpoint: string; type: string }> = []
+        const seen = new Set<string>()
+
+        // 1) ~/.claude/settings.json -> enabledPlugins (plugin:<name>@<marketplace>)
         try {
-          const output = execSync('claude mcp list 2>&1', { timeout: 30000, encoding: 'utf-8' })
-          const connectors: any[] = []
-          const lines = output.split('\n').filter(l => l.trim() && !l.startsWith('Checking'))
-          for (const line of lines) {
-            // Format: "name: endpoint - ✓ Connected" or "name: endpoint - ! Needs authentication"
-            const match = line.match(/^(.+?):\s+(.+)\s+-\s+(.+)$/)
-            if (!match) continue
-            const name = match[1].trim()
-            const endpoint = match[2].trim()
-            const statusText = match[3].trim()
-            let status = 'unknown'
-            if (statusText.includes('Connected')) status = 'connected'
-            else if (statusText.includes('Needs auth') || statusText.includes('authentication')) status = 'needs_auth'
-            else if (statusText.includes('Failed')) status = 'failed'
-
-            const isRemote = endpoint.startsWith('http')
-            const isPlugin = name.startsWith('plugin:')
-            const type = isPlugin ? 'plugin' : (isRemote ? 'remote' : 'local')
-
-            connectors.push({ name, status, endpoint, type })
+          const settings = JSON.parse(readFileOr(join(homedir(), '.claude', 'settings.json'), '{}'))
+          for (const pluginKey of Object.keys(settings.enabledPlugins || {})) {
+            if (!settings.enabledPlugins[pluginKey]) continue
+            const name = `plugin:${pluginKey.split('@')[0]}`
+            if (seen.has(name)) continue
+            seen.add(name)
+            connectors.push({ name, status: 'configured', endpoint: pluginKey, type: 'plugin' })
           }
-          return json(res, connectors)
-        } catch (err) {
-          logger.error({ err }, 'Failed to list MCP connectors')
-          return json(res, [])
+        } catch { /* ignore */ }
+
+        // 2) project .mcp.json and user-global ~/.claude.json -> mcpServers
+        for (const src of [join(PROJECT_ROOT, '.mcp.json'), join(homedir(), '.claude.json')]) {
+          try {
+            const parsed = JSON.parse(readFileOr(src, '{}'))
+            const servers = parsed.mcpServers || {}
+            for (const [name, cfg] of Object.entries(servers) as Array<[string, any]>) {
+              if (seen.has(name)) continue
+              seen.add(name)
+              const endpoint = cfg?.url || cfg?.command || ''
+              const type = cfg?.url ? 'remote' : 'local'
+              connectors.push({ name, status: 'configured', endpoint: String(endpoint), type })
+            }
+          } catch { /* ignore */ }
         }
+
+        return json(res, connectors)
       }
 
-      // GET /api/connectors/:name - Get detailed info about an MCP server
+      // GET /api/connectors/:name - Get detailed info about an MCP server.
+      // Same reasoning as the list endpoint: read the config directly
+      // instead of invoking `claude mcp get`, which would re-spawn the
+      // server for a health check.
       const connectorDetailMatch = path.match(/^\/api\/connectors\/(.+)$/)
       if (connectorDetailMatch && method === 'GET' && !path.includes('/assign')) {
         const name = decodeURIComponent(connectorDetailMatch[1])
-        try {
-          const output = execSync(`claude mcp get ${shellEscape(name)} 2>&1`, { timeout: 15000, encoding: 'utf-8' })
-          const scope = output.match(/Scope:\s+(.+)/)?.[1]?.trim() || ''
-          const status = output.includes('\u2713 Connected') ? 'connected' : output.includes('! Needs') ? 'needs_auth' : 'failed'
-          const type = output.match(/Type:\s+(.+)/)?.[1]?.trim() || ''
-          const command = output.match(/Command:\s+(.+)/)?.[1]?.trim() || ''
-          const args = output.match(/Args:\s+(.+)/)?.[1]?.trim() || ''
-          const envLines = output.split('\n').filter(l => l.match(/^\s{4}\w+=/))
-          const env: Record<string, string> = {}
-          for (const el of envLines) {
-            const [k, ...v] = el.trim().split('=')
-            env[k] = '***'  // Don't expose actual values
+        // Plugin entry -> just confirm it's in enabledPlugins
+        if (name.startsWith('plugin:')) {
+          try {
+            const settings = JSON.parse(readFileOr(join(homedir(), '.claude', 'settings.json'), '{}'))
+            const plain = name.slice('plugin:'.length)
+            const match = Object.keys(settings.enabledPlugins || {}).find(k => k.split('@')[0] === plain)
+            if (!match) return json(res, { error: 'Connector not found' }, 404)
+            return json(res, { name, scope: 'user', status: 'configured', type: 'plugin', command: match, args: '', env: {} })
+          } catch {
+            return json(res, { error: 'Connector not found' }, 404)
           }
-          return json(res, { name, scope, status, type, command, args, env })
-        } catch {
-          return json(res, { error: 'Connector not found' }, 404)
         }
+        // mcpServers entry from project or user config
+        for (const [src, scope] of [[join(PROJECT_ROOT, '.mcp.json'), 'project' as const], [join(homedir(), '.claude.json'), 'user' as const]]) {
+          try {
+            const parsed = JSON.parse(readFileOr(src, '{}'))
+            const cfg = (parsed.mcpServers || {})[name]
+            if (!cfg) continue
+            const type = cfg.url ? 'remote' : 'local'
+            const env: Record<string, string> = {}
+            for (const k of Object.keys(cfg.env || {})) env[k] = '***'
+            return json(res, {
+              name,
+              scope,
+              status: 'configured',
+              type,
+              command: cfg.command || cfg.url || '',
+              args: Array.isArray(cfg.args) ? cfg.args.join(' ') : '',
+              env,
+            })
+          } catch { /* fall through */ }
+        }
+        return json(res, { error: 'Connector not found' }, 404)
       }
 
       // POST /api/connectors - Add a new MCP server
@@ -2717,48 +3327,44 @@ Respond ONLY with JSON, nothing else:
         }
       }
 
-      // POST /api/connectors/:name/assign - Assign MCP to specific agent(s)
+      // POST /api/connectors/:name/assign - Assign MCP to specific agent(s).
+      // Read the connector config from the same files /api/connectors uses
+      // (no `claude mcp get` spawn = no Telegram plugin collision). Plugin
+      // entries (plugin:*) are always available to every agent via Claude
+      // Code itself, so we no-op those -- writing them into .mcp.json
+      // wouldn't make them work anyway and confuses the /doctor output.
       const connectorAssignMatch = path.match(/^\/api\/connectors\/(.+)\/assign$/)
       if (connectorAssignMatch && method === 'POST') {
         const connectorName = decodeURIComponent(connectorAssignMatch[1])
         const body = await readBody(req)
         const { agents: targetAgents } = JSON.parse(body.toString()) as { agents: string[] }
 
-        let connectorConfig: any = null
-        try {
-          const output = execSync(`claude mcp get ${shellEscape(connectorName)} 2>&1`, { timeout: 15000, encoding: 'utf-8' })
-          const command = output.match(/Command:\s+(.+)/)?.[1]?.trim()
-          const args = output.match(/Args:\s+(.+)/)?.[1]?.trim()
-          const url = output.match(/https?:\/\/[^\s]+/)?.[0]
-          connectorConfig = { command, args, url }
-        } catch {
-          return json(res, { error: 'Connector not found' }, 404)
+        if (connectorName.startsWith('plugin:')) {
+          return json(res, { ok: true, note: 'plugin:* connectors are global to every agent -- nothing to assign.' })
         }
+
+        let connectorConfig: any = null
+        for (const src of [join(PROJECT_ROOT, '.mcp.json'), join(homedir(), '.claude.json')]) {
+          try {
+            const parsed = JSON.parse(readFileOr(src, '{}'))
+            if (parsed.mcpServers && parsed.mcpServers[connectorName]) {
+              connectorConfig = parsed.mcpServers[connectorName]
+              break
+            }
+          } catch { /* fall through */ }
+        }
+        if (!connectorConfig) return json(res, { error: 'Connector not found' }, 404)
 
         const AGENTS_BASE = join(PROJECT_ROOT, 'agents')
         for (const agentName of targetAgents) {
           const mcpPath = join(AGENTS_BASE, agentName, '.mcp.json')
           if (!existsSync(mcpPath)) continue
-
           let mcpConfig: any = {}
           try { mcpConfig = JSON.parse(readFileSync(mcpPath, 'utf-8')) } catch {}
           if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {}
-
-          if (connectorConfig.url) {
-            mcpConfig.mcpServers[connectorName] = {
-              type: 'http',
-              url: connectorConfig.url
-            }
-          } else if (connectorConfig.command) {
-            mcpConfig.mcpServers[connectorName] = {
-              command: connectorConfig.command,
-              args: connectorConfig.args ? connectorConfig.args.split(/\s+/) : []
-            }
-          }
-
+          mcpConfig.mcpServers[connectorName] = connectorConfig
           writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2))
         }
-
         return json(res, { ok: true })
       }
 
@@ -3364,9 +3970,26 @@ Respond ONLY with JSON, nothing else:
   const pluginMonitorInterval = startTelegramPluginMonitor()
   logger.info('Telegram plugin health monitor started (60s poll)')
 
+  // Start update checker -- polls GitHub every 15 min for new commits.
+  const updateCheckerInterval = startUpdateChecker()
+  logger.info('Update checker started (15min poll)')
+
   // Warm the Marveen bot username cache so /api/marveen returns @username
   // on the first dashboard load. Re-fetched lazily otherwise.
   refreshMarveenBotUsername().catch(() => {})
+
+  // Backfill the PreCompact hook into existing agents' settings.json so the
+  // auto-skill / auto-memory flow runs on context compaction. No-op if the
+  // agent already has its own hooks block.
+  try {
+    const patched: string[] = []
+    for (const agentName of listAgentNames()) {
+      if (ensureAgentHooks(agentName)) patched.push(agentName)
+    }
+    if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
+  } catch (err) {
+    logger.warn({ err }, 'Agent hook backfill skipped')
+  }
 
   // Cleanup router on server close
   const origClose = server.close.bind(server)
@@ -3374,6 +3997,7 @@ Respond ONLY with JSON, nothing else:
     clearInterval(routerInterval)
     clearInterval(scheduleInterval)
     clearInterval(pluginMonitorInterval)
+    clearInterval(updateCheckerInterval)
     return origClose(cb)
   }
 

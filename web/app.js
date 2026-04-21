@@ -63,12 +63,13 @@ themeToggle.addEventListener('click', () => {
 })
 
 // === Page switching ===
-const navLinks = document.querySelectorAll('.nav-link[data-page]')
+const navLinks = document.querySelectorAll('.sb-link[data-page], .nav-link[data-page]')
 const pages = document.querySelectorAll('.page')
 
 function switchPage(pageId) {
   pages.forEach((p) => (p.hidden = p.id !== pageId + 'Page'))
   navLinks.forEach((l) => l.classList.toggle('active', l.dataset.page === pageId))
+  if (pageId === 'overview') loadOverview()
   if (pageId === 'kanban') loadKanban()
   if (pageId === 'tasks') loadSchedules()
   if (pageId === 'agents') loadAgents()
@@ -77,6 +78,8 @@ function switchPage(pageId) {
   if (pageId === 'connectors') loadConnectors()
   if (pageId === 'migrate') loadMigrateAgents()
   if (pageId === 'status') loadStatus()
+  if (pageId === 'updates') loadUpdates()
+  if (pageId === 'team') loadTeamGraph()
 }
 
 navLinks.forEach((link) => {
@@ -675,8 +678,14 @@ document.getElementById('wizardCreateBtn').addEventListener('click', async () =>
     }
 
     closeModal(agentWizardOverlay)
-    showToast('Ágens sikeresen létrehozva!')
-    loadAgents()
+    showToast('Ügynök létrehozva. Kösd be a Telegramot a párosításhoz.')
+    await loadAgents()
+    // Drop the operator straight into the Telegram tab of the new agent so
+    // the pairing step is in front of them -- easy to miss otherwise.
+    try {
+      await openAgentDetail(name)
+      switchAgentTab('telegram')
+    } catch { /* detail open failed, list refresh already happened */ }
   } catch (err) {
     showToast(`Hiba: ${err.message}`)
   } finally {
@@ -870,7 +879,7 @@ async function openAgentDetail(agentName) {
     if (!res.ok) throw new Error('Nem található')
     currentAgent = await res.json()
   } catch (err) {
-    showToast('Ágens betöltése sikertelen')
+    showToast('Ügynök betöltése sikertelen')
     return
   }
 
@@ -891,7 +900,7 @@ async function openAgentDetail(agentName) {
   document.getElementById('agentDetailDesc').textContent = currentAgent.description || ''
   document.getElementById('agentDetailModel').textContent = currentAgent.model || 'inherit'
 
-  const tgConnected = currentAgent.telegramConnected || currentAgent.telegram_connected || false
+  const tgConnected = currentAgent.hasTelegram || false
   document.getElementById('agentDetailTgStatus').innerHTML = `<span class="tg-status"><span class="tg-dot ${tgConnected ? 'connected' : 'disconnected'}"></span>${tgConnected ? 'Csatlakozva' : 'Nincs bekötve'}</span>`
 
   // Settings tab - load Ollama models then set value
@@ -903,6 +912,7 @@ async function openAgentDetail(agentName) {
     document.getElementById('editAgentProfileDesc'),
     currentAgent.securityProfile || 'default',
   )
+  renderTeamEditor(currentAgent, agents)
   document.getElementById('editClaudeMd').value = currentAgent.claudeMd || currentAgent.content || ''
   document.getElementById('editSoulMd').value = currentAgent.soulMd || ''
   document.getElementById('editMcpJson').value = currentAgent.mcpJson || ''
@@ -929,7 +939,7 @@ async function openAgentDetail(agentName) {
     try {
       await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, { method: 'DELETE' })
       closeModal(agentDetailOverlay)
-      showToast('Ágens törölve')
+      showToast('Ügynök törölve')
       loadAgents()
     } catch (err) {
       showToast('Hiba a törlés során')
@@ -1062,7 +1072,7 @@ document.getElementById('agentStartBtn').addEventListener('click', async () => {
       const err = await res.json()
       throw new Error(err.error || 'Indítási hiba')
     }
-    showToast('Ágens elindítva!')
+    showToast('Ügynök elindítva!')
     // Refresh
     const detailRes = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`)
     if (detailRes.ok) {
@@ -1081,7 +1091,7 @@ document.getElementById('agentStartBtn').addEventListener('click', async () => {
 
 document.getElementById('agentStopBtn').addEventListener('click', async () => {
   if (!currentAgent) return
-  if (!confirm('Biztosan leállítod az ágenst?')) return
+  if (!confirm('Biztosan leállítod az ügynököt?')) return
 
   try {
     const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/stop`, { method: 'POST' })
@@ -1089,7 +1099,7 @@ document.getElementById('agentStopBtn').addEventListener('click', async () => {
       const err = await res.json()
       throw new Error(err.error || 'Leállítási hiba')
     }
-    showToast('Ágens leállítva')
+    showToast('Ügynök leállítva')
     const detailRes = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`)
     if (detailRes.ok) {
       currentAgent = await detailRes.json()
@@ -1114,6 +1124,7 @@ function switchAgentTab(tab) {
   document.getElementById('tabSettings').hidden = tab !== 'settings'
   document.getElementById('tabTelegram').hidden = tab !== 'telegram'
   document.getElementById('tabSkills').hidden = tab !== 'skills'
+  document.getElementById('tabTeam').hidden = tab !== 'team'
 }
 
 // === Settings save buttons ===
@@ -1735,7 +1746,7 @@ async function loadScheduleAgents() {
       sel.appendChild(opt)
     }
   } catch (err) {
-    console.error('Ágens lista hiba:', err)
+    console.error('Ügynök lista hiba:', err)
   }
 }
 
@@ -2242,7 +2253,7 @@ async function loadMemAgents() {
     const agents = await res.json()
     const sel = document.getElementById('memAgentFilter')
     const memSel = document.getElementById('memAgent')
-    sel.innerHTML = '<option value="">Minden agens</option>'
+    sel.innerHTML = '<option value="">Minden ügynök</option>'
     memSel.innerHTML = ''
     for (const a of agents) {
       sel.innerHTML += `<option value="${a.name}">${a.label}</option>`
@@ -3235,7 +3246,15 @@ function showZoomIndicator() {
 // === Daily Log ===
 
 async function loadDailyLog() {
-  const agent = document.getElementById('memAgentFilter').value || 'marveen'
+  // "Minden ügynök" (empty value) falls back to the first agent in the
+  // filter dropdown, which is the main agent on any BOT_NAME -- avoids a
+  // hardcoded "marveen" slug that would 404 on zino/haver/etc installs.
+  const sel = document.getElementById('memAgentFilter')
+  const agent = sel.value || (sel.options[1] ? sel.options[1].value : '')
+  if (!agent) {
+    renderLogEntries([])
+    return
+  }
 
   try {
     const datesRes = await fetch(`/api/daily-log/dates?agent=${agent}`)
@@ -3654,11 +3673,11 @@ async function openConnectorDetail(connector) {
       listEl.appendChild(item)
     }
     if (subAgents.length === 0 && !mainAgent) {
-      listEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincsenek hozzarendelheto agensek</p>'
+      listEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincsenek hozzarendelheto ügynökök</p>'
     } else if (subAgents.length === 0) {
       const note = document.createElement('p')
       note.style.cssText = 'color:var(--text-muted);font-size:12px;margin-top:8px'
-      note.textContent = 'Sub-agentekhez hozzárendelés a Csapat oldalon létrehozott új ágens után érhető el.'
+      note.textContent = 'Sub-agentekhez hozzárendelés a Csapat oldalon létrehozott új ügynök után érhető el.'
       listEl.appendChild(note)
     }
   } catch {
@@ -3681,7 +3700,7 @@ async function openConnectorDetail(connector) {
   // Assign button
   document.getElementById('connectorAssignBtn').onclick = async () => {
     const checked = [...document.querySelectorAll('#connectorAgentList input:checked')].map(i => i.value)
-    if (checked.length === 0) { showToast('Válassz legalább egy ágenst'); return }
+    if (checked.length === 0) { showToast('Válassz legalább egy ügynököt'); return }
     try {
       await fetch(`/api/connectors/${encodeURIComponent(connector.name)}/assign`, {
         method: 'POST',
@@ -4212,7 +4231,7 @@ function renderGlobalSkills() {
     <div class="stat-card"><div class="stat-value">${globalSkills.length}</div><div class="stat-label">Osszes skill</div></div>
     <div class="stat-card"><div class="stat-value" style="color:var(--success)">${withSkillMd.length}</div><div class="stat-label">Dokumentalt</div></div>
     <div class="stat-card"><div class="stat-value" style="color:var(--info)">${totalAssigned}</div><div class="stat-label">Hozzarendelesek</div></div>
-    ${unassigned ? `<div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">${unassigned}</div><div class="stat-label">Nincs agensnel</div></div>` : ''}
+    ${unassigned ? `<div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">${unassigned}</div><div class="stat-label">Nincs ügynöknél</div></div>` : ''}
   `
 
   if (globalSkills.length === 0) {
@@ -4295,15 +4314,15 @@ async function openSkillDetail(skillName) {
         checkboxesEl.appendChild(item)
       }
       if (subAgents.length === 0 && !mainAgent) {
-        checkboxesEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincsenek hozzarendelheto agensek</p>'
+        checkboxesEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincsenek hozzarendelheto ügynökök</p>'
       } else if (subAgents.length === 0) {
         const note = document.createElement('p')
         note.style.cssText = 'color:var(--text-muted);font-size:12px;margin-top:8px'
-        note.textContent = 'Sub-agenteknek hozzárendelés a Csapat oldalon létrehozott új ágens után érhető el.'
+        note.textContent = 'Sub-agenteknek hozzárendelés a Csapat oldalon létrehozott új ügynök után érhető el.'
         checkboxesEl.appendChild(note)
       }
     } catch {
-      checkboxesEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Agensek betoltese sikertelen</p>'
+      checkboxesEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Ügynökök betoltese sikertelen</p>'
     }
 
     // Assign button
@@ -4374,7 +4393,357 @@ if (globalImportSkillBtn && globalSkillFileInput) {
   })
 }
 
+// === Team page ===
+async function loadTeamGraph() {
+  const container = document.getElementById('teamGraph')
+  if (!container) return
+  container.innerHTML = '<div class="team-empty">Betöltés...</div>'
+  try {
+    const res = await fetch('/api/team/graph')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    renderTeamGraph(container, data)
+  } catch (err) {
+    container.innerHTML = `<div class="team-empty">Hiba: ${err.message || err}</div>`
+  }
+}
+
+function renderTeamGraph(container, data) {
+  const { nodes, edges, mainAgentId } = data
+  container.innerHTML = ''
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const childrenOf = new Map()
+  for (const n of nodes) childrenOf.set(n.id, [])
+  for (const e of edges) {
+    if (childrenOf.has(e.from)) childrenOf.get(e.from).push(e.to)
+  }
+  const renderNode = (node) => {
+    const div = document.createElement('div')
+    div.className = 'team-node'
+    if (node.role === 'main') div.classList.add('main')
+    else if (node.role === 'leader') div.classList.add('leader')
+    const roleLabel = node.role === 'main' ? 'főügynök' : (node.role === 'leader' ? 'csapatvezető' : 'beosztott')
+    const running = node.running ? '● Fut' : '○ Leállva'
+    const avatarUrl = node.id === mainAgentId
+      ? `/api/marveen/avatar?t=${Date.now()}`
+      : `/api/agents/${encodeURIComponent(node.id)}/avatar?t=${Date.now()}`
+    div.innerHTML = `
+      <div class="team-node-avatar"><img src="${avatarUrl}" alt="${escapeHtml(node.label || node.id)}" onerror="this.style.display='none'"></div>
+      <div class="team-node-name">${escapeHtml(node.label || node.id)}</div>
+      <div class="team-node-meta">${escapeHtml(roleLabel)}</div>
+      <div class="team-node-meta">${running}</div>
+    `
+    if (node.id !== mainAgentId) {
+      div.addEventListener('click', () => openAgentDetail(node.id))
+    }
+    return div
+  }
+  // BFS levels starting from main
+  const levels = [[mainAgentId]]
+  const seen = new Set([mainAgentId])
+  while (levels[levels.length - 1].length) {
+    const nextIds = []
+    for (const id of levels[levels.length - 1]) {
+      for (const child of childrenOf.get(id) || []) {
+        if (!seen.has(child)) { seen.add(child); nextIds.push(child) }
+      }
+    }
+    if (nextIds.length === 0) break
+    levels.push(nextIds)
+  }
+  // Orphans (nodes not reachable from main, shouldn't happen with the auto
+  // fallback on the backend but guard just in case) go to a trailing level.
+  const orphans = nodes.filter(n => !seen.has(n.id))
+  if (orphans.length) levels.push(orphans.map(n => n.id))
+  for (let i = 0; i < levels.length; i++) {
+    const level = document.createElement('div')
+    level.className = 'team-level'
+    for (const id of levels[i]) {
+      const node = byId.get(id)
+      if (!node) continue
+      level.appendChild(renderNode(node))
+    }
+    container.appendChild(level)
+    if (i < levels.length - 1) {
+      const conn = document.createElement('div')
+      conn.className = 'team-connector'
+      container.appendChild(conn)
+    }
+  }
+  if (nodes.length === 1) {
+    const empty = document.createElement('div')
+    empty.className = 'team-empty'
+    empty.textContent = 'Nincs sub-agent létrehozva.'
+    container.appendChild(empty)
+  }
+}
+
+const refreshTeamBtn = document.getElementById('refreshTeamBtn')
+if (refreshTeamBtn) refreshTeamBtn.addEventListener('click', loadTeamGraph)
+
+function renderTeamEditor(agent, allAgents) {
+  const team = agent.team || { role: 'member', reportsTo: null, delegatesTo: [], autoDelegation: false }
+  document.getElementById('editTeamRole').value = team.role || 'member'
+  const reportsSel = document.getElementById('editTeamReportsTo')
+  reportsSel.innerHTML = ''
+  const emptyOpt = document.createElement('option')
+  emptyOpt.value = ''
+  emptyOpt.textContent = '(főügynök)'
+  reportsSel.appendChild(emptyOpt)
+  for (const other of allAgents) {
+    if (other.name === agent.name) continue
+    const opt = document.createElement('option')
+    opt.value = other.name
+    opt.textContent = other.displayName || other.name
+    if (team.reportsTo === other.name) opt.selected = true
+    reportsSel.appendChild(opt)
+  }
+  const delegatesBox = document.getElementById('editTeamDelegatesList')
+  delegatesBox.innerHTML = ''
+  for (const other of allAgents) {
+    if (other.name === agent.name) continue
+    const label = document.createElement('label')
+    label.style.cssText = 'display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px'
+    const cb = document.createElement('input')
+    cb.type = 'checkbox'
+    cb.value = other.name
+    cb.checked = team.delegatesTo && team.delegatesTo.includes(other.name)
+    label.appendChild(cb)
+    const span = document.createElement('span')
+    span.textContent = other.displayName || other.name
+    label.appendChild(span)
+    delegatesBox.appendChild(label)
+  }
+  document.getElementById('editTeamAutoDelegation').checked = !!team.autoDelegation
+  // Only leaders make sense to delegate from -- hide the lists for members.
+  const updateLeaderVisibility = () => {
+    const isLeader = document.getElementById('editTeamRole').value === 'leader'
+    document.getElementById('editTeamDelegatesGroup').style.display = isLeader ? '' : 'none'
+    document.getElementById('editTeamAutoGroup').style.display = isLeader ? '' : 'none'
+  }
+  document.getElementById('editTeamRole').onchange = updateLeaderVisibility
+  updateLeaderVisibility()
+}
+
+document.getElementById('saveTeamBtn').addEventListener('click', async () => {
+  if (!currentAgent || currentAgent.role === 'main') return
+  const btn = document.getElementById('saveTeamBtn')
+  const role = document.getElementById('editTeamRole').value
+  const reportsToRaw = document.getElementById('editTeamReportsTo').value
+  const delegates = Array.from(document.querySelectorAll('#editTeamDelegatesList input[type=checkbox]:checked')).map(cb => cb.value)
+  const autoDelegation = document.getElementById('editTeamAutoDelegation').checked
+  const originalText = btn.textContent
+  btn.disabled = true
+  btn.textContent = 'Mentés...'
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/team`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        role,
+        reportsTo: reportsToRaw || null,
+        delegatesTo: role === 'leader' ? delegates : [],
+        autoDelegation: role === 'leader' ? autoDelegation : false,
+      }),
+    })
+    if (!res.ok) throw new Error()
+    showToast('Csapat mentve')
+    btn.textContent = '✓ Mentve'
+    setTimeout(() => { btn.textContent = originalText; btn.disabled = false }, 1800)
+    loadAgents()
+  } catch {
+    showToast('Hiba a csapat mentésekor')
+    btn.textContent = originalText
+    btn.disabled = false
+  }
+})
+
+// === Overview page ===
+function formatRelative(ts) {
+  const diff = Math.max(0, Date.now() - ts)
+  const min = Math.floor(diff / 60000)
+  if (min < 1) return 'most'
+  if (min < 60) return `${min}p`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}ó`
+  const day = Math.floor(hr / 24)
+  return `${day}n`
+}
+
+async function loadOverview() {
+  try {
+    const res = await fetch('/api/overview')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const d = await res.json()
+    // Stats
+    document.getElementById('statAgents').textContent = d.agents.running
+    document.getElementById('statAgentsSub').textContent = `${d.agents.total} összesen`
+    document.getElementById('statTasks').textContent = d.tasksToday
+    const taskDiff = d.tasksToday - d.tasksYesterday
+    document.getElementById('statTasksSub').textContent = taskDiff === 0 ? 'ugyanaz mint tegnap' : (taskDiff > 0 ? `+${taskDiff} a tegnapihoz` : `${taskDiff} a tegnapihoz`)
+    document.getElementById('statMemories').textContent = d.memories.count.toLocaleString('hu-HU').replace(/,/g, ' ')
+    document.getElementById('statMemoriesSub').textContent = `bejegyzés · ${d.memories.categories} category`
+    document.getElementById('statSkills').textContent = d.skills.count
+    document.getElementById('statSkillsSub').textContent = d.skills.today > 0 ? `ebből ${d.skills.today} ma` : ''
+    // Team: reuse the hierarchy graph renderer so the overview card shows
+    // exactly what the Csapat page does (avatars + reports-to tree).
+    try {
+      const tg = await fetch('/api/team/graph')
+      if (tg.ok) {
+        const graph = await tg.json()
+        renderTeamGraph(document.getElementById('overviewTeamGrid'), graph)
+      }
+    } catch {}
+    // Activity
+    const act = document.getElementById('overviewActivity')
+    act.innerHTML = ''
+    if (!d.activity || d.activity.length === 0) {
+      act.innerHTML = '<div style="color:var(--text-muted);font-size:13px">Nincs friss esemény.</div>'
+    } else {
+      for (const a of d.activity) {
+        const icon = a.icon === 'delegate'
+          ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>'
+          : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3C7.5 3 4 6.5 4 11v4l-2 3h4v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2h4l-2-3v-4c0-4.5-3.5-8-8-8z"/></svg>'
+        const item = document.createElement('div')
+        item.className = 'overview-activity-item'
+        item.innerHTML = `
+          <div class="overview-activity-icon">${icon}</div>
+          <div class="overview-activity-body">
+            <div class="overview-activity-title">${escapeHtml(a.text)}</div>
+            <div class="overview-activity-time">${formatRelative(a.at)}</div>
+          </div>
+        `
+        act.appendChild(item)
+      }
+    }
+  } catch (err) {
+    document.getElementById('overviewActivity').innerHTML = `<div style="color:var(--text-muted);font-size:13px">Hiba: ${err.message || err}</div>`
+  }
+}
+
+// Brand mark: use main agent's avatar if available
+async function initSidebarBrand() {
+  try {
+    const img = document.createElement('img')
+    img.src = '/api/marveen/avatar?t=' + Date.now()
+    img.onload = () => {
+      const mark = document.getElementById('sidebarBrandMark')
+      if (mark) { mark.textContent = ''; mark.appendChild(img) }
+    }
+    const res = await fetch('/api/marveen')
+    if (res.ok) {
+      const m = await res.json()
+      const name = document.getElementById('sidebarBrandName')
+      if (name && m.name) name.textContent = m.name
+    }
+  } catch {}
+}
+initSidebarBrand()
+
+// === Updates page ===
+function escapeHtmlUpdates(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function renderUpdatesBadge(status) {
+  const badge = document.getElementById('updatesBadge')
+  if (!badge) return
+  if (status && status.behind && status.behind > 0) {
+    badge.textContent = String(status.behind)
+    badge.hidden = false
+  } else {
+    badge.hidden = true
+  }
+}
+
+async function pollUpdatesBadge() {
+  try {
+    const res = await fetch('/api/updates')
+    if (!res.ok) return
+    renderUpdatesBadge(await res.json())
+  } catch {}
+}
+
+async function loadUpdates() {
+  const summary = document.getElementById('updatesSummary')
+  const list = document.getElementById('updatesCommitList')
+  const applyBtn = document.getElementById('updatesApplyBtn')
+  summary.textContent = 'Ellenőrzés...'
+  summary.className = 'updates-summary'
+  list.innerHTML = ''
+  try {
+    const res = await fetch('/api/updates')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    renderUpdatesBadge(data)
+    const cur = (data.current || '').slice(0, 7) || '–'
+    const lat = (data.latest || '').slice(0, 7) || '–'
+    if (data.error) {
+      summary.className = 'updates-summary error'
+      summary.innerHTML = `<strong>Nem sikerült ellenőrizni:</strong> ${escapeHtmlUpdates(data.error)}<br>Jelenlegi: <code>${cur}</code>`
+      applyBtn.hidden = true
+    } else if (data.behind === 0) {
+      summary.className = 'updates-summary up-to-date'
+      summary.innerHTML = `<strong>A legfrissebb verzión vagy</strong> (<code>${cur}</code>). Nincs teendő.`
+      applyBtn.hidden = true
+    } else {
+      summary.className = 'updates-summary behind'
+      summary.innerHTML = `<strong>${data.behind} új commit elérhető</strong> a <code>${escapeHtmlUpdates(data.remote)}</code> repón.<br>Jelenlegi: <code>${cur}</code> → Legfrissebb: <code>${lat}</code>`
+      applyBtn.hidden = false
+    }
+    if (data.commits && data.commits.length) {
+      list.innerHTML = data.commits.map(c => `
+        <div class="updates-commit">
+          <div class="updates-commit-head">
+            <span>${escapeHtmlUpdates(c.short)} · ${escapeHtmlUpdates(c.author)}</span>
+            <span>${escapeHtmlUpdates((c.date || '').slice(0, 10))}</span>
+          </div>
+          <div class="updates-commit-msg">${escapeHtmlUpdates(c.message)}</div>
+        </div>
+      `).join('')
+    } else if (data.behind === 0) {
+      list.innerHTML = `<p style="color:var(--text-muted);font-size:13px">Nincs változás.</p>`
+    }
+  } catch (err) {
+    summary.className = 'updates-summary error'
+    summary.textContent = 'Hiba: ' + (err.message || err)
+    applyBtn.hidden = true
+  }
+}
+
+document.getElementById('updatesCheckBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('updatesCheckBtn')
+  btn.disabled = true
+  try { await fetch('/api/updates/check', { method: 'POST' }) } catch {}
+  await loadUpdates()
+  btn.disabled = false
+})
+
+document.getElementById('updatesApplyBtn').addEventListener('click', async () => {
+  if (!confirm('Frissítés most. A szolgáltatások újraindulnak, a dashboard ~30 másodpercig nem érhető el. Folytatod?')) return
+  const btn = document.getElementById('updatesApplyBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+  try {
+    const res = await fetch('/api/updates/apply', { method: 'POST' })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    showToast('Frissítés elindult, a dashboard újratöltődik...')
+    setTimeout(() => window.location.reload(), 30000)
+  } catch (err) {
+    showToast('Hiba: ' + (err.message || err))
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// Poll the badge on startup and every 5 min so the nav link reflects
+// the cached status even on tabs other than the Updates page.
+pollUpdatesBadge()
+setInterval(pollUpdatesBadge, 5 * 60_000)
+
 // === Init ===
 populateAvatarGrid()
 loadMemAgents()
-loadKanban()
+loadOverview()
