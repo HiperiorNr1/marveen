@@ -4541,24 +4541,15 @@ async function loadOverview() {
     document.getElementById('statMemoriesSub').textContent = `bejegyzés · ${d.memories.categories} category`
     document.getElementById('statSkills').textContent = d.skills.count
     document.getElementById('statSkillsSub').textContent = d.skills.today > 0 ? `ebből ${d.skills.today} ma` : ''
-    // Team
-    const teamGrid = document.getElementById('overviewTeamGrid')
-    teamGrid.innerHTML = ''
-    for (const a of d.team) {
-      const card = document.createElement('div')
-      card.className = 'overview-agent' + (a.role === 'main' ? ' main' : '')
-      const statusClass = a.running ? '' : 'stopped'
-      const statusText = a.running ? 'aktív' : 'leállva'
-      card.innerHTML = `
-        <div class="overview-agent-avatar"><img src="${escapeHtml(a.avatarUrl)}?t=${Date.now()}" onerror="this.style.display='none'" alt=""></div>
-        <div>
-          <div class="overview-agent-name">${escapeHtml(a.label)}</div>
-          <div class="overview-agent-status ${statusClass}"><span class="dot"></span>${statusText}</div>
-        </div>
-      `
-      if (a.role !== 'main') card.addEventListener('click', () => openAgentDetail(a.id))
-      teamGrid.appendChild(card)
-    }
+    // Team: reuse the hierarchy graph renderer so the overview card shows
+    // exactly what the Csapat page does (avatars + reports-to tree).
+    try {
+      const tg = await fetch('/api/team/graph')
+      if (tg.ok) {
+        const graph = await tg.json()
+        renderTeamGraph(document.getElementById('overviewTeamGrid'), graph)
+      }
+    } catch {}
     // Activity
     const act = document.getElementById('overviewActivity')
     act.innerHTML = ''

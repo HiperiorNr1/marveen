@@ -1349,6 +1349,52 @@ function readTaskHistory(): TaskRunEntry[] {
     return []
   }
 }
+// Count "real" user turns (operator prompts, Telegram messages) in every
+// Claude Code session JSONL under ~/.claude/projects/. Filters out
+// tool_result, local-command, and synthetic system events so a task-heavy
+// hour doesn't inflate the counter.
+function countUserTurns(fromMs: number, toMs: number = Number.POSITIVE_INFINITY): number {
+  const root = join(homedir(), '.claude', 'projects')
+  if (!existsSync(root)) return 0
+  let total = 0
+  try {
+    for (const projectDir of readdirSync(root)) {
+      const absDir = join(root, projectDir)
+      let stat: ReturnType<typeof statSync>
+      try { stat = statSync(absDir) } catch { continue }
+      if (!stat.isDirectory()) continue
+      for (const fname of readdirSync(absDir)) {
+        if (!fname.endsWith('.jsonl')) continue
+        const absFile = join(absDir, fname)
+        let fstat: ReturnType<typeof statSync>
+        try { fstat = statSync(absFile) } catch { continue }
+        if (fstat.mtimeMs < fromMs) continue  // nothing modified in window
+        try {
+          const data = readFileSync(absFile, 'utf-8')
+          for (const line of data.split('\n')) {
+            if (!line) continue
+            let e: any
+            try { e = JSON.parse(line) } catch { continue }
+            if (e.type !== 'user' || e.isMeta) continue
+            const ts = e.timestamp ? Date.parse(e.timestamp) : 0
+            if (!ts || ts < fromMs || ts >= toMs) continue
+            const content = e.message?.content
+            if (typeof content === 'string') {
+              if (content.startsWith('<local-command') || content.startsWith('<command-name>')) continue
+              total++
+            } else if (Array.isArray(content)) {
+              const hasToolResult = content.some((b: any) => b && b.type === 'tool_result')
+              if (hasToolResult) continue
+              total++
+            }
+          }
+        } catch { /* skip unreadable file */ }
+      }
+    }
+  } catch { /* ignore */ }
+  return total
+}
+
 function appendTaskRun(name: string, agent: string): void {
   const now = Date.now()
   const history = readTaskHistory().filter(e => now - e.ts < TASK_HISTORY_TTL)
@@ -1877,15 +1923,20 @@ export function startWebServer(port = 3420): http.Server {
         const memCats = db0.prepare("SELECT COUNT(DISTINCT category) as c FROM memories").get() as { c: number }
         // Task runs: read the persisted history so the number survives
         // dashboard restarts (the in-memory scheduleLastRun map empties on
-        // every reload, which is how this counter showed 0 after the sidebar
-        // rebuild even though the scheduler had fired plenty of tasks).
+        // every reload). Add user-initiated turns from the Claude Code
+        // session JSONLs on top, so prompts the operator sends over
+        // Telegram count the same as cron tasks.
         const startOfDay = new Date()
         startOfDay.setHours(0, 0, 0, 0)
         const startTs = startOfDay.getTime()
         const taskHistory = readTaskHistory()
-        const tasksToday = taskHistory.filter(e => e.ts >= startTs).length
+        const schedToday = taskHistory.filter(e => e.ts >= startTs).length
         const yesterday = startTs - 24 * 60 * 60 * 1000
-        const tasksYesterday = taskHistory.filter(e => e.ts >= yesterday && e.ts < startTs).length
+        const schedYesterday = taskHistory.filter(e => e.ts >= yesterday && e.ts < startTs).length
+        const userTurns = countUserTurns(startTs)
+        const userTurnsPrev = countUserTurns(yesterday, startTs)
+        const tasksToday = schedToday + userTurns
+        const tasksYesterday = schedYesterday + userTurnsPrev
         // Skills count: global ~/.claude/skills/ directories with SKILL.md
         let skillCount = 0
         let skillsToday = 0
