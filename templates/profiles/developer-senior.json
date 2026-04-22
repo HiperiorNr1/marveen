@@ -1,7 +1,7 @@
 {
   "id": "developer-senior",
-  "label": "Fejlesztő (senior)",
-  "description": "Kódfejlesztésre, repo-kezelésre, build-futtatásra optimalizált profil. Szélesebb jogkör, de a legveszélyesebb parancsok (sudo, force-push, rm -rf $HOME) tiltva.",
+  "label": "Fejlesztő (senior, bizalmi)",
+  "description": "Bizalmi profil: permissive módban fut, minden parancs engedélyezve, kivéve a deny-listát (sudo, SSH/AWS/GnuPG kulcsok olvasása, force-push, rm -rf $HOME). Csak olyan ágensnek add, amit ugyanannyira megbízol mint magadat. Nem sandbox. Sandboxolt profilért lásd developer-junior.",
   "permissionMode": "permissive",
   "filesystem": {
     "allow": [],
