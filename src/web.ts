@@ -4051,10 +4051,13 @@ Respond ONLY with JSON, nothing else:
 
   server.listen(port, WEB_HOST, () => {
     logger.info({ port }, `Web dashboard: http://localhost:${port}`)
-    // Access URL embeds the token so the browser can bootstrap auth on first
-    // visit. The client strips the token from the URL after storing it.
-    logger.info(
-      `Dashboard access URL (paste into browser, token is stored afterward):\n  http://127.0.0.1:${port}/?token=${DASHBOARD_TOKEN}`
+    // Do NOT log the bearer token: launchd/journal/pipe captures of the
+    // structured log would otherwise carry a root-equivalent credential.
+    // Print the bootstrap URL directly to stderr instead so it shows in the
+    // interactive terminal but does not land in the pino log stream.
+    const bootstrapUrl = `http://127.0.0.1:${port}/?token=${DASHBOARD_TOKEN}`
+    process.stderr.write(
+      `\nDashboard access URL (paste into browser, token is stored afterward):\n  ${bootstrapUrl}\n\n`
     )
   })
 
