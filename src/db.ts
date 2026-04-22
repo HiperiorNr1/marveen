@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { STORE_DIR, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
 
 let db: Database.Database
@@ -236,6 +236,53 @@ export function initDatabase(): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
+
+  // --- Task Run History ---
+  // Log every scheduled-task firing so the dashboard overview's "tasksToday"
+  // survives dashboard restarts. Replaces the old store/task-run-history.json
+  // which had a plain read-modify-write race under concurrent/restart.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      ts INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_ts ON task_runs(ts)`)
+
+  // One-shot migration from the old JSON file (which had a read-modify-write
+  // race). Import rows if they exist, then rename the file so we don't keep
+  // re-importing. Wrapped in a transaction so a crash mid-import is safe.
+  migrateTaskRunsFromJson()
+}
+
+function migrateTaskRunsFromJson(): void {
+  const legacyPath = join(STORE_DIR, 'task-run-history.json')
+  if (!existsSync(legacyPath)) return
+  const existingCount = (db.prepare('SELECT COUNT(*) as c FROM task_runs').get() as { c: number }).c
+  if (existingCount > 0) {
+    // Already migrated in a previous run. Rename the file out of the way if
+    // still present so the migration doesn't keep re-running with zero effect.
+    try { renameSync(legacyPath, `${legacyPath}.migrated`) } catch { /* fine */ }
+    return
+  }
+  try {
+    const raw = readFileSync(legacyPath, 'utf-8')
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return
+    const insert = db.prepare('INSERT INTO task_runs (name, agent, ts) VALUES (?, ?, ?)')
+    const tx = db.transaction((rows: unknown[]) => {
+      for (const e of rows) {
+        if (!e || typeof e !== 'object') continue
+        const { name, agent, ts } = e as { name?: unknown; agent?: unknown; ts?: unknown }
+        if (typeof name !== 'string' || typeof agent !== 'string' || typeof ts !== 'number') continue
+        insert.run(name, agent, ts)
+      }
+    })
+    tx(arr)
+    try { renameSync(legacyPath, `${legacyPath}.migrated`) } catch { /* fine */ }
+  } catch { /* corrupt file, skip */ }
 }
 
 export function getDb(): Database.Database {
@@ -708,6 +755,28 @@ export function markMessageFailed(id: number, error?: string): boolean {
 
 export function listAgentMessages(limit = 50): AgentMessage[] {
   return db.prepare('SELECT * FROM agent_messages ORDER BY created_at DESC LIMIT ?').all(limit) as AgentMessage[]
+}
+
+// --- Task Run History ---
+
+export interface TaskRunEntry { name: string; agent: string; ts: number }
+
+const TASK_RUN_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+export function appendTaskRun(name: string, agent: string): void {
+  const now = Date.now()
+  db.prepare('INSERT INTO task_runs (name, agent, ts) VALUES (?, ?, ?)').run(name, agent, now)
+  // Opportunistic TTL prune: cheap indexed DELETE, keeps the table bounded.
+  db.prepare('DELETE FROM task_runs WHERE ts < ?').run(now - TASK_RUN_TTL_MS)
+}
+
+export function countTaskRunsBetween(fromTs: number, toTs?: number): number {
+  if (toTs === undefined) {
+    const row = db.prepare('SELECT COUNT(*) as c FROM task_runs WHERE ts >= ?').get(fromTs) as { c: number }
+    return row.c
+  }
+  const row = db.prepare('SELECT COUNT(*) as c FROM task_runs WHERE ts >= ? AND ts < ?').get(fromTs, toTs) as { c: number }
+  return row.c
 }
 
 export function getAgentMessage(id: number): AgentMessage | undefined {

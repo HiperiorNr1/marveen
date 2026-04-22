@@ -21,6 +21,7 @@ import {
   deleteKanbanCard, getKanbanComments, addKanbanComment,
   createAgentMessage, getPendingMessages, markMessageDelivered,
   markMessageDone, markMessageFailed, listAgentMessages, getAgentMessage,
+  appendTaskRun, countTaskRunsBetween,
   type Memory, type AgentMessage,
 } from './db.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, ALLOWED_CHAT_ID, HEARTBEAT_CALENDAR_ID } from './config.js'
@@ -1459,19 +1460,6 @@ const PENDING_RETRY_WINDOW_MS = 60 * 60 * 1000
 
 // Persistent task run history so the overview's "tasksToday" number survives
 // dashboard restarts. Keep the last 30 days.
-const TASK_HISTORY_PATH = join(PROJECT_ROOT, 'store', 'task-run-history.json')
-const TASK_HISTORY_TTL = 30 * 24 * 60 * 60 * 1000
-interface TaskRunEntry { name: string; agent: string; ts: number }
-function readTaskHistory(): TaskRunEntry[] {
-  try {
-    const raw = readFileSync(TASK_HISTORY_PATH, 'utf-8')
-    const arr = JSON.parse(raw)
-    if (!Array.isArray(arr)) return []
-    return arr
-  } catch {
-    return []
-  }
-}
 // Count "real" user turns (operator prompts, Telegram messages) in every
 // Claude Code session JSONL under ~/.claude/projects/. Filters out
 // tool_result, local-command, and synthetic system events so a task-heavy
@@ -1516,18 +1504,6 @@ function countUserTurns(fromMs: number, toMs: number = Number.POSITIVE_INFINITY)
     }
   } catch { /* ignore */ }
   return total
-}
-
-function appendTaskRun(name: string, agent: string): void {
-  const now = Date.now()
-  const history = readTaskHistory().filter(e => now - e.ts < TASK_HISTORY_TTL)
-  history.push({ name, agent, ts: now })
-  try {
-    mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
-    writeFileSync(TASK_HISTORY_PATH, JSON.stringify(history))
-  } catch (err) {
-    logger.warn({ err }, 'Failed to persist task run history')
-  }
 }
 
 function cronMatchesNow(cron: string, catchUpMs: number = 60000): boolean {
@@ -2130,10 +2106,9 @@ export function startWebServer(port = 3420): http.Server {
         const startOfDay = new Date()
         startOfDay.setHours(0, 0, 0, 0)
         const startTs = startOfDay.getTime()
-        const taskHistory = readTaskHistory()
-        const schedToday = taskHistory.filter(e => e.ts >= startTs).length
         const yesterday = startTs - 24 * 60 * 60 * 1000
-        const schedYesterday = taskHistory.filter(e => e.ts >= yesterday && e.ts < startTs).length
+        const schedToday = countTaskRunsBetween(startTs)
+        const schedYesterday = countTaskRunsBetween(yesterday, startTs)
         const userTurns = countUserTurns(startTs)
         const userTurnsPrev = countUserTurns(yesterday, startTs)
         const tasksToday = schedToday + userTurns
