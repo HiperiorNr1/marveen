@@ -1517,10 +1517,25 @@ function cronMatchesNow(cron: string, catchUpMs: number = 60000): boolean {
 function sendPromptToSession(session: string, text: string): void {
   const oneLine = text.replace(/\r?\n/g, ' ')
   const CHUNK = 80
-  for (let i = 0; i < oneLine.length; i += CHUNK) {
-    const chunk = oneLine.slice(i, i + CHUNK)
+  // tmux send-keys doesn't support `--` option-terminator, so a chunk that
+  // starts with '-' parses as a flag ("command send-keys: unknown flag -s"
+  // on Hungarian suffixes like -szal/-vel/-ban). Slide the boundary up to a
+  // few chars past any '-' that lands at the start of the next chunk. Capped
+  // so a long run of dashes doesn't inflate one chunk past the paste-detector
+  // threshold; if the cap is reached, prepend a space to the chunk instead.
+  const MAX_SLIDE = 8
+  let i = 0
+  while (i < oneLine.length) {
+    let end = Math.min(i + CHUNK, oneLine.length)
+    let slide = 0
+    while (end < oneLine.length && oneLine[end] === '-' && slide < MAX_SLIDE) {
+      end++; slide++
+    }
+    let chunk = oneLine.slice(i, end)
+    if (chunk.startsWith('-')) chunk = ' ' + chunk
     execFileSync(TMUX, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
-    if (i + CHUNK < oneLine.length) execFileSync('/bin/sleep', ['0.03'], { timeout: 1000 })
+    i = end
+    if (i < oneLine.length) execFileSync('/bin/sleep', ['0.03'], { timeout: 1000 })
   }
   execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
 }
