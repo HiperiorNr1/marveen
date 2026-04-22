@@ -1,4 +1,4 @@
-import { query } from '@anthropic-ai/claude-code'
+import { query } from '@anthropic-ai/claude-agent-sdk'
 import { PROJECT_ROOT } from './config.js'
 
 const TYPING_REFRESH_MS = 4000
