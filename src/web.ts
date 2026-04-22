@@ -1415,11 +1415,11 @@ const scheduleLastRun: Map<string, number> = new Map()
 // cron-matcher only fires on an exact minute boundary, so without a retry
 // queue the task would be skipped for the whole day. Keep it here and
 // retry on subsequent 60s ticks until the session frees up or the window
-// expires (15 min -- plenty for a finishing turn, but not so long we end
-// up running the noon check at 14:00).
+// expires. 60 min accommodates long-running audits and multi-agent turns
+// that can span 40-70 minutes without letting a missed noon run land at 14:00.
 interface PendingRetry { firstAttempt: number; task: ScheduledTask; agent: string }
 const pendingTaskRetries: Map<string, PendingRetry> = new Map()
-const PENDING_RETRY_WINDOW_MS = 15 * 60 * 1000
+const PENDING_RETRY_WINDOW_MS = 60 * 60 * 1000
 
 // Persistent task run history so the overview's "tasksToday" number survives
 // dashboard restarts. Keep the last 30 days.
@@ -1792,6 +1792,9 @@ function startScheduleRunner(): NodeJS.Timeout {
       if (now - pending.firstAttempt > PENDING_RETRY_WINDOW_MS) {
         logger.warn({ task: pending.task.name, agent: pending.agent, windowMs: PENDING_RETRY_WINDOW_MS }, 'Pending scheduled task retry window expired, abandoning')
         pendingTaskRetries.delete(key)
+        // Clear lastRun so the next cron match for this task is free to fire
+        // even if the abandoned window overlaps the next scheduled boundary.
+        scheduleLastRun.delete(pending.task.name)
         continue
       }
       const result = attemptFireTask(pending.task, pending.agent, now)
