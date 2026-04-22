@@ -1414,8 +1414,10 @@ function softReconnectMarveen(): boolean {
     execFileSync('/bin/sleep', ['0.2'], { timeout: 1000 })
     execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, '/mcp', 'Enter'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['0.3'], { timeout: 1000 })
+    execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, 'telegram'], { timeout: 3000 })
+    execFileSync('/bin/sleep', ['0.2'], { timeout: 1000 })
     execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, 'Enter'], { timeout: 3000 })
-    logger.info('Marveen soft reconnect: sent /mcp + Enter')
+    logger.info('Marveen soft reconnect: sent /mcp + "telegram" filter + Enter')
     return true
   } catch (err) {
     logger.warn({ err }, 'Marveen soft reconnect failed')
