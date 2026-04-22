@@ -4037,13 +4037,55 @@ Respond ONLY with JSON, nothing else:
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
+      // Try to reclaim the port only if the listener is another node/dashboard
+      // process owned by us. Blind `lsof -ti | xargs kill -9` would take down
+      // whatever happens to be on the port (e.g. an unrelated dev server),
+      // and under launchd it also race-kills the not-yet-dead predecessor.
       logger.warn({ port }, 'Web port foglalt, probalok felszabaditani...')
-      import('node:child_process').then(({ execSync }) => {
-        try {
-          execSync(`lsof -ti :${port} 2>/dev/null | xargs kill -9 2>/dev/null || true`, { timeout: 5000 })
-        } catch { /* ignored */ }
-        setTimeout(() => server.listen(port), 1500)
-      })
+      try {
+        const pidsRaw = execSync(`lsof -ti :${port} 2>/dev/null || true`, { timeout: 3000, encoding: 'utf-8' }).trim()
+        const pids = pidsRaw.split('\n').map(s => s.trim()).filter(Boolean).map(Number).filter(n => Number.isFinite(n) && n > 0)
+        const uid = typeof process.getuid === 'function' ? process.getuid() : null
+        const victims: number[] = []
+        for (const pid of pids) {
+          if (pid === process.pid) continue
+          let cmd = ''
+          try {
+            cmd = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'comm='], { timeout: 2000, encoding: 'utf-8' }).trim()
+          } catch { continue }
+          if (uid !== null) {
+            try {
+              const ownerUid = parseInt(execFileSync('/bin/ps', ['-p', String(pid), '-o', 'uid='], { timeout: 2000, encoding: 'utf-8' }).trim(), 10)
+              if (Number.isFinite(ownerUid) && ownerUid !== uid) continue
+            } catch { continue }
+          }
+          if (!/node|tsx/i.test(cmd)) {
+            logger.warn({ port, pid, cmd }, 'Port held by non-node process -- refusing to kill')
+            continue
+          }
+          victims.push(pid)
+        }
+        for (const pid of victims) {
+          try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+        }
+        if (victims.length) {
+          setTimeout(() => {
+            for (const pid of victims) {
+              try {
+                process.kill(pid, 0)
+                // still alive -- escalate
+                try { process.kill(pid, 'SIGKILL') } catch { /* gone */ }
+              } catch { /* gone */ }
+            }
+            server.listen(port)
+          }, 1500)
+        } else {
+          logger.error({ port }, 'Port foglalt de nem talaltunk felszabadithato node processt -- kilepes')
+          process.exit(1)
+        }
+      } catch (e) {
+        logger.error({ err: e }, 'Port-reclaim failed')
+      }
     } else {
       logger.error({ err }, 'Web szerver hiba')
     }
