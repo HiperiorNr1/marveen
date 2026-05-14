@@ -1,14 +1,18 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { PROJECT_ROOT, OWNER_NAME } from '../config.js'
+import { PROJECT_ROOT, OWNER_NAME, BOT_NAME, MAIN_AGENT_ID } from '../config.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { agentDir } from './agent-config.js'
 import { resolveProfilePlaceholders, type ProfileTemplate } from './profiles.js'
 
 function resolveTemplatePlaceholders(content: string): string {
-  return content.replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
+  return content
+    .replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
+    .replaceAll('{{MAIN_AGENT_ID}}', MAIN_AGENT_ID)
+    .replaceAll('{{BOT_NAME}}', BOT_NAME)
+    .replaceAll('{{OWNER_NAME}}', OWNER_NAME)
 }
 
 // Idempotent migration: every agent's settings.json should carry the
@@ -68,7 +72,9 @@ export function ensureDefaultScheduledTasks(): void {
     if (existsSync(dest)) continue
     mkdirSync(dest, { recursive: true })
     for (const file of readdirSync(src)) {
-      copyFileSync(join(src, file), join(dest, file))
+      const srcFile = join(src, file)
+      if (!statSync(srcFile).isFile()) continue
+      atomicWriteFileSync(join(dest, file), resolveTemplatePlaceholders(readFileSync(srcFile, 'utf-8')))
     }
   }
 }
