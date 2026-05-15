@@ -50,7 +50,10 @@ Valaszolj KIZAROLAG JSON formatumban, semmi mas:
 ]`
 
     try {
-      const { text } = await runAgent(aiPrompt)
+      const { text } = await runAgent(
+        aiPrompt, undefined, undefined, undefined, undefined, undefined,
+        'marveen-schedule-config',
+      )
       if (!text) throw new Error('No response')
       const jsonMatch = text.match(/\[[\s\S]*\]/)
       if (!jsonMatch) throw new Error('Invalid response format')
@@ -81,7 +84,10 @@ ${answersText}
 Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code fence-t.`
 
     try {
-      const { text } = await runAgent(aiPrompt)
+      const { text } = await runAgent(
+        aiPrompt, undefined, undefined, undefined, undefined, undefined,
+        'marveen-schedule-config',
+      )
       if (!text) throw new Error('No response')
       let expanded = text.trim()
       if (expanded.startsWith('```')) expanded = expanded.replace(/^```\w*\n?/, '').replace(/\n?```$/, '')

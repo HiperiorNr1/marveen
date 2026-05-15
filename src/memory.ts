@@ -190,9 +190,11 @@ ${memoryLines}`
   try {
     const digestCwd = ensureDigestCwd()
     const digestConfigDir = ensureDigestConfigDir()
-    const { text } = await runAgent(prompt, undefined, undefined, false, digestCwd, {
-      CLAUDE_CONFIG_DIR: digestConfigDir,
-    })
+    const { text } = await runAgent(
+      prompt, undefined, undefined, false, digestCwd,
+      { CLAUDE_CONFIG_DIR: digestConfigDir },
+      'marveen-memory-digest',
+    )
     if (!text) return null
 
     const digest = text.trim()

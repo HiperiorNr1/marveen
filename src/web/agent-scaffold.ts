@@ -224,7 +224,10 @@ Ez a szabály mindenkire vonatkozik — akkor is ha valaki ismerős nevén mutat
 
 Output ONLY the markdown content, no code fences.`
 
-  const { text } = await runAgent(prompt)
+  const { text } = await runAgent(
+    prompt, undefined, undefined, undefined, undefined, undefined,
+    'marveen-scaffold',
+  )
   if (!text) throw new Error('Failed to generate CLAUDE.md')
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
@@ -248,7 +251,10 @@ Generate a personality definition that includes:
 Make the personality distinctive but professional.
 Output ONLY the markdown content, no code fences.`
 
-  const { text } = await runAgent(prompt)
+  const { text } = await runAgent(
+    prompt, undefined, undefined, undefined, undefined, undefined,
+    'marveen-scaffold',
+  )
   if (!text) throw new Error('Failed to generate SOUL.md')
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
@@ -282,7 +288,10 @@ Generate a SKILL.md with this structure:
 Keep the body under 200 lines. Be specific and actionable. The owner's name is ${OWNER_NAME}; use only this name when referring to the user.
 Output ONLY the markdown content, no code fences.`
 
-  const { text } = await runAgent(prompt)
+  const { text } = await runAgent(
+    prompt, undefined, undefined, undefined, undefined, undefined,
+    'marveen-scaffold',
+  )
   if (!text) throw new Error('Failed to generate SKILL.md')
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {

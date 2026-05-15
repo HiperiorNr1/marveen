@@ -41,7 +41,9 @@ export async function tryHandleTasks(ctx: RouteContext): Promise<boolean> {
 A prompt legyen magyar nyelvu, konkret utasitasokkal.
 Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas.
 
-Rovid leiras: "${finalPrompt}"`
+Rovid leiras: "${finalPrompt}"`,
+          undefined, undefined, undefined, undefined, undefined,
+          'marveen-task-prompt-expand',
         )
         if (text) finalPrompt = text.trim()
       } catch (err) {
