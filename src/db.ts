@@ -336,10 +336,80 @@ export function initDatabase(): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_pending_retries_first_attempt ON pending_task_retries(first_attempt)`)
 
+  // --- Token usage ---
+  // Logs every SDK runAgent() call so the dashboard can report per-agent
+  // token consumption. Anthropic split interactive vs. programmatic credit
+  // buckets on 2026-06-15 (Pro $20/mo, Max 5x $100/mo, Max 20x $200/mo),
+  // so the operator needs an early warning before bucket exhaustion. One
+  // row per SDK result event; the per-model breakdown lives in model_usage
+  // as JSON so we can carry the SDK's own struct verbatim (today four
+  // counters per model: input, output, cache_creation_input,
+  // cache_read_input). total_cost_usd is the SDK's own computation -- we
+  // do not duplicate the pricing table here.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS token_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      session_id TEXT,
+      num_turns INTEGER,
+      duration_ms INTEGER,
+      is_error INTEGER NOT NULL DEFAULT 0,
+      total_cost_usd REAL NOT NULL DEFAULT 0,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+      model_usage TEXT NOT NULL DEFAULT '{}'
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_agent_ts ON token_usage(agent_id, ts)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(ts)`)
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
   migrateTaskRunsFromJson()
+}
+
+// --- Token usage ---
+
+export interface TokenUsageRecord {
+  agentId: string
+  ts?: number
+  sessionId?: string | null
+  numTurns?: number | null
+  durationMs?: number | null
+  isError?: boolean
+  totalCostUsd: number
+  inputTokens: number
+  outputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
+  modelUsage?: Record<string, unknown>
+}
+
+export function recordTokenUsage(rec: TokenUsageRecord): void {
+  db.prepare(
+    `INSERT INTO token_usage
+       (agent_id, ts, session_id, num_turns, duration_ms, is_error,
+        total_cost_usd, input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens, model_usage)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    rec.agentId,
+    rec.ts ?? Math.floor(Date.now() / 1000),
+    rec.sessionId ?? null,
+    rec.numTurns ?? null,
+    rec.durationMs ?? null,
+    rec.isError ? 1 : 0,
+    rec.totalCostUsd,
+    rec.inputTokens,
+    rec.outputTokens,
+    rec.cacheCreationInputTokens,
+    rec.cacheReadInputTokens,
+    JSON.stringify(rec.modelUsage ?? {}),
+  )
 }
 
 function migrateTaskRunsFromJson(): void {

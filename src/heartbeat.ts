@@ -5,6 +5,7 @@ import {
   HEARTBEAT_END_HOUR,
   HEARTBEAT_CALENDAR_ID,
   STORE_DIR,
+  MAIN_AGENT_ID,
 } from './config.js'
 import { getHeartbeatKanbanSummary, getActiveScheduledTaskCount } from './db.js'
 import { getCalendarEvents, type CalendarEvent } from './google-api.js'
@@ -215,7 +216,10 @@ async function executeHeartbeat(): Promise<void> {
   const prompt = buildAgentPrompt(data)
 
   try {
-    const { text } = await runAgent(prompt)
+    const { text } = await runAgent(
+      prompt, undefined, undefined, undefined, undefined, undefined,
+      `${MAIN_AGENT_ID}:heartbeat`,
+    )
     if (text) {
       await notifyTelegram(text)
       logger.info('Heartbeat ertesites elkuldve')

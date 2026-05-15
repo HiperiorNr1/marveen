@@ -30,6 +30,7 @@ import { tryHandleMarveen } from './web/routes/marveen.js'
 import { tryHandleOverview } from './web/routes/overview.js'
 import { tryHandleUpdates } from './web/routes/updates.js'
 import { tryHandleStatus } from './web/routes/status.js'
+import { tryHandleUsage } from './web/routes/usage.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import type { RouteContext } from './web/routes/types.js'
 
@@ -118,6 +119,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleOverview(routeCtx)) return
       if (await tryHandleUpdates(routeCtx)) return
       if (await tryHandleStatus(routeCtx)) return
+      if (await tryHandleUsage(routeCtx)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)
