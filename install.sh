@@ -53,9 +53,9 @@ fi
 
 if [ "$MISSING" -eq 1 ]; then
   echo ""
-  echo -e "${ORANGE}Hianyzo fuggosegek telepitese Homebrew-val...${NC}"
+  echo -e "${ORANGE}Hianyzo függőségek telepítése Homebrew-val...${NC}"
   if ! command -v brew &>/dev/null; then
-    echo -e "${ORANGE}Homebrew nincs telepitve. Megprobalom most (sudo jelszo kellhet)...${NC}"
+    echo -e "${ORANGE}Homebrew nincs telepítve. Megprobalom most (sudo jelszo kellhet)...${NC}"
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     # Homebrew on Apple Silicon installs to /opt/homebrew; add it to PATH now
     # so subsequent `brew` calls in this script succeed without a shell restart.
@@ -65,20 +65,20 @@ if [ "$MISSING" -eq 1 ]; then
       eval "$(/usr/local/bin/brew shellenv)"
     fi
     if ! command -v brew &>/dev/null; then
-      echo -e "${RED}Homebrew telepitese sikertelen. Telepitsd manualisan (https://brew.sh) es futtasd ujra az installert.${NC}"
+      echo -e "${RED}Homebrew telepítése sikertelen. Telepitsd manualisan (https://brew.sh) es futtasd ujra az installert.${NC}"
       exit 1
     fi
   fi
   command -v node &>/dev/null || brew install node@22
   command -v tmux &>/dev/null || brew install tmux
   command -v git &>/dev/null || brew install git
-  echo -e "${GREEN}✓ Fuggosegek telepitve${NC}"
+  echo -e "${GREEN}✓ Függőségek telepítve${NC}"
 fi
 
 # Bun (required by Telegram channels plugin)
 export PATH="$HOME/.bun/bin:$PATH"
 if ! command -v bun &>/dev/null; then
-  echo -e "  ${ORANGE}Bun telepitese (Telegram plugin fuggoseg)...${NC}"
+  echo -e "  ${ORANGE}Bun telepítése (Telegram plugin függőség)...${NC}"
   curl -fsSL https://bun.sh/install | bash 2>/dev/null
   # Source the profile that bun installer modified
   [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null
@@ -99,7 +99,7 @@ if ! command -v claude &>/dev/null; then
   if [ "$INSTALL_CLAUDE" = "i" ]; then
     npm install -g @anthropic-ai/claude-code
   else
-    echo -e "${RED}Claude Code CLI szukseges a futtatáshoz.${NC}"
+    echo -e "${RED}Claude Code CLI szükséges a futtatáshoz.${NC}"
     exit 1
   fi
 fi
@@ -168,11 +168,11 @@ if [ "$DO_AUTH" = "i" ]; then
     echo -e "  ${DIM}A telepites folytatodik. Belepheted kesobb: ${BOLD}claude auth login${NC}"
   fi
 fi
-echo -e "  ${GREEN}✓${NC} Claude Code first-run beallitas kesz"
+echo -e "  ${GREEN}✓${NC} Claude Code first-run beállítás kész"
 
 # Step 3: Personal info
 echo ""
-echo -e "${BOLD}[3/7] Szemelyes beallitasok${NC}"
+echo -e "${BOLD}[3/7] Személyes beállítások${NC}"
 read -p "  Mi a neved? " OWNER_NAME
 # Chat ID is NOT asked here -- the user doesn't know it yet.
 # It will be set automatically during the Telegram pairing flow.
@@ -180,7 +180,7 @@ CHAT_ID="0"
 
 # Step 4: Channel provider setup
 echo ""
-echo -e "${BOLD}[4/7] Csatorna beallitas${NC}"
+echo -e "${BOLD}[4/7] Csatorna beállítás${NC}"
 echo -e "${DIM}  Melyik csatornan kommunikaljon az AI asszisztensed?${NC}"
 echo -e "  ${BOLD}1.${NC} Telegram (alapertelmezett)"
 echo -e "  ${BOLD}2.${NC} Slack"
@@ -217,6 +217,48 @@ else
   echo ""
   read -p "  Bot Token (xoxb-...): " SLACK_BOT_TOKEN
   read -p "  App-Level Token (xapp-...): " SLACK_APP_TOKEN
+
+  # Managed settings: Claude Code requires allowedChannelPlugins at system level
+  MANAGED_DIR="/Library/Application Support/ClaudeCode"
+  MANAGED_FILE="$MANAGED_DIR/managed-settings.json"
+  SLACK_ENTRY='{"plugin":"slack-channel","marketplace":"marveen-marketplace"}'
+  TELEGRAM_ENTRY='{"plugin":"telegram","marketplace":"claude-plugins-official"}'
+  REQUIRED_JSON="{\"allowedChannelPlugins\":[$SLACK_ENTRY,$TELEGRAM_ENTRY]}"
+
+  if [ -f "$MANAGED_FILE" ]; then
+    HAS_SLACK=$(sudo python3 -c "
+import json, sys
+try:
+  d = json.load(open('$MANAGED_FILE'))
+  plugins = d.get('allowedChannelPlugins', [])
+  sys.exit(0 if any(p.get('plugin')=='slack-channel' and p.get('marketplace')=='marveen-marketplace' for p in plugins) else 1)
+except: sys.exit(1)
+" 2>/dev/null && echo "yes" || echo "no")
+    if [ "$HAS_SLACK" = "no" ]; then
+      echo -e "  ${ORANGE}⚠${NC} A managed-settings.json frissítése szükséges (sudo)."
+      echo "$REQUIRED_JSON" | sudo python3 -c "
+import json, sys
+new = json.loads(sys.stdin.read())
+try:
+  with open('$MANAGED_FILE') as f: existing = json.load(f)
+except: existing = {}
+plugins = existing.get('allowedChannelPlugins', [])
+for entry in new['allowedChannelPlugins']:
+  if not any(p.get('plugin')==entry['plugin'] and p.get('marketplace')==entry['marketplace'] for p in plugins):
+    plugins.append(entry)
+existing['allowedChannelPlugins'] = plugins
+print(json.dumps(existing, indent=2))
+" | sudo tee "$MANAGED_FILE" > /dev/null
+      echo -e "  ${GREEN}✓${NC} managed-settings.json frissítve"
+    else
+      echo -e "  ${GREEN}✓${NC} managed-settings.json mar tartalmazza a Slack plugint"
+    fi
+  else
+    echo -e "  ${ORANGE}⚠${NC} Managed settings létrehozása szükséges (sudo)."
+    sudo mkdir -p "$MANAGED_DIR"
+    echo "$REQUIRED_JSON" | python3 -c "import json,sys; print(json.dumps(json.loads(sys.stdin.read()),indent=2))" | sudo tee "$MANAGED_FILE" > /dev/null
+    echo -e "  ${GREEN}✓${NC} managed-settings.json létrehozva"
+  fi
 fi
 
 read -p "  Mi legyen a botod neve? [Marveen]: " BOT_NAME
@@ -239,10 +281,10 @@ fi
 
 # Step 5: Install dependencies
 echo ""
-echo -e "${BOLD}[5/7] Fuggosegek telepitese...${NC}"
+echo -e "${BOLD}[5/7] Függőségek telepítése...${NC}"
 cd "$INSTALL_DIR"
 npm install --silent
-echo -e "  ${GREEN}✓${NC} npm csomagok telepitve"
+echo -e "  ${GREEN}✓${NC} npm csomagok telepítve"
 
 # Build TypeScript
 echo -e "  Forditas..."
@@ -251,7 +293,7 @@ echo -e "  ${GREEN}✓${NC} TypeScript leforditva"
 
 # Step 6: Configuration
 echo ""
-echo -e "${BOLD}[6/7] Konfiguracio letrehozasa...${NC}"
+echo -e "${BOLD}[6/7] Konfiguráció létrehozása...${NC}"
 
 # Create .env
 (umask 077 && cat > "$INSTALL_DIR/.env" << ENVEOF
@@ -271,12 +313,12 @@ else
   echo "SLACK_APP_TOKEN=${SLACK_APP_TOKEN}" >> "$INSTALL_DIR/.env"
 fi
 chmod 600 "$INSTALL_DIR/.env"
-echo -e "  ${GREEN}✓${NC} .env letrehozva (chmod 600)"
+echo -e "  ${GREEN}✓${NC} .env létrehozva (chmod 600)"
 
 # Create store directory
 mkdir -p "$INSTALL_DIR/store"
 mkdir -p "$INSTALL_DIR/agents"
-echo -e "  ${GREEN}✓${NC} Konyvtarak letrehozva"
+echo -e "  ${GREEN}✓${NC} Könyvtárak létrehozva"
 
 # Generate CLAUDE.md from template
 if [ -f "$INSTALL_DIR/templates/CLAUDE.md.template" ]; then
@@ -372,12 +414,12 @@ fi
 echo -e "  ${CHANNEL_PROVIDER} plugin telepites..."
 claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
 if claude plugin install "$PLUGIN_ID" 2>/dev/null; then
-  echo -e "  ${GREEN}✓${NC} ${CHANNEL_PROVIDER} plugin telepitve"
+  echo -e "  ${GREEN}✓${NC} ${CHANNEL_PROVIDER} plugin telepítve"
 else
   echo -e "  ${ORANGE}Elso probalkozas sikertelen, ujraprobalok...${NC}"
   sleep 2
   if claude plugin install "$PLUGIN_ID" 2>/dev/null; then
-    echo -e "  ${GREEN}✓${NC} ${CHANNEL_PROVIDER} plugin telepitve (masodik probalkozesal)"
+    echo -e "  ${GREEN}✓${NC} ${CHANNEL_PROVIDER} plugin telepítve (masodik próbálkozással)"
   else
     echo -e "  ${RED}✗${NC} ${CHANNEL_PROVIDER} plugin telepites sikertelen."
     echo -e "  ${BOLD}Futtasd kesobb kezzel:${NC}"
@@ -391,7 +433,7 @@ SKILLS_DIR="$HOME/.claude/skills"
 if [ -d "$INSTALL_DIR/skills/skill-factory" ]; then
   mkdir -p "$SKILLS_DIR/skill-factory"
   cp -r "$INSTALL_DIR/skills/skill-factory/"* "$SKILLS_DIR/skill-factory/"
-  echo -e "  ${GREEN}✓${NC} skill-factory telepitve"
+  echo -e "  ${GREEN}✓${NC} skill-factory telepítve"
 fi
 
 # Ollama + nomic-embed-text (szemantikus kereséshez)
@@ -470,7 +512,7 @@ fi
 
 # Step 7: LaunchAgent setup
 echo ""
-echo -e "${BOLD}[7/7] Automatikus inditas beallitasa...${NC}"
+echo -e "${BOLD}[7/7] Automatikus indítás beállítása...${NC}"
 
 PLIST_DIR="$HOME/Library/LaunchAgents"
 mkdir -p "$PLIST_DIR"
@@ -552,7 +594,7 @@ cat > "$PLIST_DIR/${CHANNELS_PLIST}.plist" << PLISTEOF
 </plist>
 PLISTEOF
 
-echo -e "  ${GREEN}✓${NC} LaunchAgent-ek letrehozva"
+echo -e "  ${GREEN}✓${NC} LaunchAgent-ek létrehozva"
 
 # Load LaunchAgents
 launchctl load "$PLIST_DIR/${DASHBOARD_PLIST}.plist" 2>/dev/null || true
@@ -570,7 +612,7 @@ if [ "$CHANNEL_PROVIDER" = "telegram" ] && ! command -v bun &>/dev/null; then
 fi
 PLUGIN_CHECK_PATTERN="${CHANNEL_PROVIDER}"
 if ! claude plugin list 2>/dev/null | grep -q "$PLUGIN_CHECK_PATTERN"; then
-  echo -e "  ${RED}✗${NC} ${CHANNEL_PROVIDER} plugin nincs telepitve."
+  echo -e "  ${RED}✗${NC} ${CHANNEL_PROVIDER} plugin nincs telepítve."
   echo -e "  ${BOLD}Javitas:${NC} claude plugin install ${PLUGIN_ID}"
   echo -e "  ${DIM}Utana: ./scripts/stop.sh && ./scripts/start.sh${NC}"
 else
@@ -650,7 +692,7 @@ fi
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${BOLD}${GREEN}  ✓ Marveen sikeresen telepitve!${NC}"
+echo -e "${BOLD}${GREEN}  ✓ Marveen sikeresen telepítve!${NC}"
 echo ""
 
 # Read dashboard token for access URL
