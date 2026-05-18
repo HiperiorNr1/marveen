@@ -610,6 +610,18 @@ DASH_UNIT="${MAIN_AGENT_ID}-dashboard"
 CHAN_UNIT="${MAIN_AGENT_ID}-channels"
 MORN_UNIT="${MAIN_AGENT_ID}-morning"
 
+# Detect the host timezone so the scheduled-task runner (which reads
+# cron expressions in Node's local TZ) fires at the operator's wall
+# clock, not the VPS UTC default. If detection fails or the host is
+# already UTC, we emit a comment instead so the unit stays explicit.
+SYSTEM_TZ="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || true)"
+SYSTEM_TZ="${SYSTEM_TZ%$'\n'}"
+if [ -n "$SYSTEM_TZ" ] && [ "$SYSTEM_TZ" != "Etc/UTC" ] && [ "$SYSTEM_TZ" != "UTC" ]; then
+  TZ_LINE="Environment=TZ=$SYSTEM_TZ"
+else
+  TZ_LINE="# no explicit TZ detected; inheriting host default"
+fi
+
 # ${DASH_UNIT}.service
 cat >"$SYSTEMD_DIR/${DASH_UNIT}.service" <<EOF
 [Unit]
@@ -626,6 +638,7 @@ StandardOutput=append:$INSTALL_DIR/store/dashboard.log
 StandardError=append:$INSTALL_DIR/store/dashboard.error.log
 Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
+${TZ_LINE}
 
 [Install]
 WantedBy=default.target
@@ -650,6 +663,7 @@ Environment=HOME=$HOME
 Environment=USER=$USER
 Environment=TERM=xterm-256color
 Environment=LANG=${LANG:-en_US.UTF-8}
+${TZ_LINE}
 
 [Install]
 WantedBy=default.target
@@ -666,6 +680,7 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/scripts/morning-briefing.sh
 Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
+${TZ_LINE}
 EOF
 
 # ${MORN_UNIT}.timer
