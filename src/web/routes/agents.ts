@@ -401,6 +401,36 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     return true
   }
 
+  // POST /api/agents/:name/channels/slack/smoke-test
+  const smokeTestMatch = path.match(/^\/api\/agents\/([^/]+)\/channels\/slack\/smoke-test$/)
+  if (smokeTestMatch && method === 'POST') {
+    const name = decodeURIComponent(smokeTestMatch[1])
+    if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    const provider = readAgentChannelProvider(name) as ChannelProviderType
+    if (provider !== 'slack') { json(res, { error: 'Nem Slack provider' }, 400); return true }
+    const scriptPath = join(agentDir(name), '..', '..', 'scripts', 'smoke-test-slack-channel.sh')
+    if (!existsSync(scriptPath)) { json(res, { error: 'Smoke-test script nem található' }, 404); return true }
+    const agentEnvPath = join(channelStateDir('slack', agentDir(name)), '.env')
+    let envContent = ''
+    try { envContent = readFileSync(agentEnvPath, 'utf-8') } catch { /* no .env */ }
+    if (!/SLACK_SMOKE_TEST_ALLOWED=true/.test(envContent)) {
+      json(res, { error: 'SLACK_SMOKE_TEST_ALLOWED=true nincs beállítva az agent .env-jében' }, 403)
+      return true
+    }
+    try {
+      const output = execSync(`bash "${scriptPath}" "${name}"`, {
+        timeout: 60000,
+        encoding: 'utf-8',
+        env: { ...process.env, SLACK_SMOKE_TEST_ALLOWED: 'true' },
+      })
+      json(res, { ok: true, output })
+    } catch (err: unknown) {
+      const execErr = err as { stdout?: string; stderr?: string }
+      json(res, { ok: false, output: (execErr.stdout || '') + (execErr.stderr || '') }, 200)
+    }
+    return true
+  }
+
   // POST /api/agents/:name/channels/:provider/test (legacy: /telegram/test)
   const testMatch = matchChannelRoute(path, '/test')
   if (testMatch && method === 'POST') {
