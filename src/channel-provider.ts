@@ -223,6 +223,70 @@ const slackProvider: ChannelProvider = {
   splitMessage: (text) => splitMessage(text, SLACK_MAX_MESSAGE_LENGTH),
 }
 
+// -- Slack App manifest --
+
+const SLACK_BOT_SCOPES = [
+  'app_mentions:read',
+  'channels:history',
+  'channels:read',
+  'chat:write',
+  'files:read',
+  'files:write',
+  'groups:history',
+  'groups:read',
+  'im:history',
+  'im:read',
+  'im:write',
+  'reactions:write',
+  'users:read',
+]
+
+const SLACK_BOT_EVENTS = [
+  'app_mention',
+  'message.channels',
+  'message.groups',
+  'message.im',
+]
+
+export function generateSlackAppManifest(appName: string): string {
+  const safeName = appName.replace(/["\\]/g, '')
+  const scopes = SLACK_BOT_SCOPES.map(s => `        - ${s}`).join('\n')
+  const events = SLACK_BOT_EVENTS.map(e => `        - ${e}`).join('\n')
+  return [
+    'display_information:',
+    `  name: ${JSON.stringify(safeName)}`,
+    'features:',
+    '  bot_user:',
+    `    display_name: ${JSON.stringify(safeName)}`,
+    '    always_online: true',
+    'oauth_config:',
+    '  scopes:',
+    '    bot:',
+    scopes,
+    'settings:',
+    '  event_subscriptions:',
+    '    bot_events:',
+    events,
+    '  interactivity:',
+    '    is_enabled: true',
+    '  org_deploy_enabled: false',
+    '  socket_mode_enabled: true',
+    '  token_rotation_enabled: false',
+  ].join('\n')
+}
+
+export function getSlackAppSetupInstructions(): string[] {
+  return [
+    'Nyisd meg az api.slack.com/apps oldalt',
+    'Kattints a "Create New App" gombra, majd válaszd a "From an app manifest" lehetőséget',
+    'Válaszd ki a workspace-t ahova telepíteni szeretnéd',
+    'Válts YAML formátumra és illeszd be a manifestet',
+    'Kattints a "Create" gombra, majd az "Install to Workspace" gombra',
+    'Másold ki a Bot User OAuth Token-t (xoxb-...) a "OAuth & Permissions" oldalról',
+    'Menj a "Basic Information" oldalra, "App-Level Tokens" szekció, kattints a "Generate Token and Scopes" gombra, adj hozzá a connections:write scope-ot, majd másold ki a tokent (xapp-...)',
+  ]
+}
+
 // -- Token resolution --
 
 export function getChannelToken(provider: ChannelProviderType, env: Record<string, string>): string {
