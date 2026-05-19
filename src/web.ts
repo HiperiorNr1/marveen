@@ -29,6 +29,7 @@ import { tryHandleSkills } from './web/routes/skills.js'
 import { tryHandleAgents } from './web/routes/agents.js'
 import { tryHandleMarveen } from './web/routes/marveen.js'
 import { tryHandleRecall } from './web/routes/recall.js'
+import { tryHandleBackgroundTasks, sweepOrphanedBackgroundTasks } from './web/routes/background-tasks.js'
 import { tryHandleOverview } from './web/routes/overview.js'
 import { tryHandleUpdates } from './web/routes/updates.js'
 import { tryHandleStatus } from './web/routes/status.js'
@@ -117,6 +118,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleSkills(routeCtx)) return
       if (await tryHandleAgents(routeCtx, WEB_DIR)) return
       if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
+      if (await tryHandleBackgroundTasks(routeCtx)) return
       if (await tryHandleRecall(routeCtx)) return
       if (await tryHandleOverview(routeCtx)) return
       if (await tryHandleUpdates(routeCtx)) return
@@ -242,6 +244,12 @@ export function startWebServer(port = 3420): http.Server {
     logger.info('Default scheduled tasks seeded')
   } catch (err) {
     logger.warn({ err }, 'Scheduled tasks seed skipped')
+  }
+
+  try {
+    sweepOrphanedBackgroundTasks()
+  } catch (err) {
+    logger.warn({ err }, 'Background task sweep skipped')
   }
 
   const origClose = server.close.bind(server)
