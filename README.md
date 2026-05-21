@@ -27,6 +27,25 @@ Marveen egy AI asszisztens keretrendszer, ami Claude Code-ra épül. Saját AI c
 - **Skillek**: Újrahasználható képességek az ágenseknek
 - **Öntanulás**: Az ágensek automatikusan tanulnak a munkájukból és skill-eket hoznak létre
 
+## 📚 Dokumentáció
+
+Részletes, funkciónkénti leírások a [`docs/`](docs/README.md) mappában — mindegyik lap két szemszögből: 🎯 *mit tud / miért érdekes* + 🛠 *hogyan működik*.
+
+| Funkció | Lap |
+|---------|-----|
+| Heartbeat + fokozatos autonómia | [docs/heartbeat-autonomy.md](docs/heartbeat-autonomy.md) |
+| Memória-rendszer (FTS5 + vektor + RRF) | [docs/memory-system.md](docs/memory-system.md) |
+| Kanban + auto-breakdown | [docs/kanban.md](docs/kanban.md) |
+| Ügynök-flotta + inter-agent | [docs/agent-fleet.md](docs/agent-fleet.md) |
+| Skill-factory (öntanulás) | [docs/skill-factory.md](docs/skill-factory.md) |
+| Channels (Telegram / Slack) | [docs/channels.md](docs/channels.md) |
+| Printing-press CLI-k | [docs/printing-press-cli.md](docs/printing-press-cli.md) |
+| Skool CLI | [docs/skool-cli.md](docs/skool-cli.md) |
+| connectors.hu | [docs/connectors-hu.md](docs/connectors-hu.md) |
+| Vault & titkosítás | [docs/vault.md](docs/vault.md) |
+| Dream-engine | [docs/dream-engine.md](docs/dream-engine.md) |
+| Háttér-feladatok | [docs/background-tasks.md](docs/background-tasks.md) |
+
 ## Öntanulás (Self-Learning)
 
 A Marveen ágensek automatikusan tanulnak a munkájukból -- a Hermes Agent rendszeréből inspirálódva.
