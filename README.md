@@ -46,211 +46,17 @@ Részletes, funkciónkénti leírások a [`docs/`](docs/README.md) mappában —
 | Dream-engine | [docs/dream-engine.md](docs/dream-engine.md) |
 | Háttér-feladatok | [docs/background-tasks.md](docs/background-tasks.md) |
 
-## Öntanulás (Self-Learning)
+## Öntanulás & Seed-ek
 
-A Marveen ágensek automatikusan tanulnak a munkájukból -- a Hermes Agent rendszeréből inspirálódva.
+Az ágensek automatikusan tanulnak a munkájukból: komplex feladat vagy hiba-recovery után újrahasznosítható skill-t (recept) írnak maguknak, a meglévőket pedig célzottan patch-elik. A skill-ek token-hatékonyan, 3 szinten töltődnek (progressive disclosure). A flotta-szintű skill-ek és ütemezett feladatok a `seed-skills/` és `seed-scheduled-tasks/` mappából terjednek minden telepítésre (idempotens: a meglévő testreszabást nem írja felül).
 
-### Hogyan működik?
-
-Az öntanulás 5 összekapcsolt mechanizmusra épül:
-
-#### 1. Nudge rendszer (reflexiós trigger)
-- A `PreCompact` hook minden kontextus-tömörítés előtt megkérdezi az ágenst: "Volt-e újrafelhasználható minta a munkádban?"
-- A 30 perces memória heartbeat szintén tartalmaz skill reflexiót
-- Az ágens saját ítélete alapján dönt, hogy mit ment el
-
-#### 2. Automatikus skill generálás
-Komplex feladatok után az ágensek automatikusan SKILL.md fájlokat hoznak létre. Triggerek:
-- 5+ tool hívás egy feladatban
-- Hiba utáni sikeres recovery
-- Felhasználói korrekció
-- Nem triviális, többlépéses workflow
-
-A generált skill-ek a `~/.claude/skills/` mappába kerülnek és azonnal elérhetőek.
-
-#### 3. Skill patch (runtime javítás)
-Ha egy ágens meglévő skill használata közben jobb megoldást talál:
-- Célzottan javítja a skill-t (nem írja újra az egészet)
-- A javítás okát dokumentálja a "Buktatók" szekcióban
-- A következő használatnál már a javított verzió fut
-
-#### 4. Progressive disclosure (token-hatékony betöltés)
-A skill-ek 3 szinten töltődnek be:
-- **Level 0**: Csak név + leírás (~100 szó) -- mindig elérhető a skill indexben
-- **Level 1**: Teljes SKILL.md tartalom -- csak ha az ágens relevánsnak ítéli
-- **Level 2**: Segédfájlok (scripts/, references/) -- csak specifikus szükséglet esetén
-
-A `scripts/skill-index.sh` automatikusan generálja a Level 0 indexet.
-
-#### 5. Skill Factory (meta-skill)
-Beépített meta-skill ami bármilyen bemutatott workflow-ból SKILL.md-t generál:
-- "Csinálj ebből skill-t" / "Tanítsd meg magad"
-- 6 lépéses eljárás: extract → generalize → write → supporting files → index → validate
-
-### Skill struktúra
-
-```
-~/.claude/skills/
-├── .skill-index.md          # Level 0 index (auto-generált)
-├── skill-factory/
-│   └── SKILL.md             # Meta-skill: workflow → skill konverzió
-├── youtube-video-seo/
-│   └── SKILL.md             # Példa: automatikusan generált skill
-└── my-custom-skill/
-    ├── SKILL.md             # Fő utasítások (<500 sor)
-    ├── scripts/             # Futtatható scriptek
-    └── references/          # Háttérdokumentáció
-```
-
-### Konfiguráció
-
-Az öntanulás a `settings.json` `PreCompact` hookján keresztül működik. A `templates/settings.json.template` tartalmazza az alapértelmezett konfigurációt, ami minden új ágensnél automatikusan beállítódik.
-
-## Seed Skills & Scheduled Tasks
-
-A repo tartalmaz előre elkészített skill-eket és ütemezett feladatokat, amelyeket a telepítő (`install.sh`) és a frissítő (`update.sh`) automatikusan bemásol a `~/.claude/skills/` és `~/.claude/scheduled-tasks/` mappákba.
-
-### Seed Skills (`seed-skills/`)
-
-Flotta-szintű skill-ek, amelyek minden telepítésnél elérhetővé válnak:
-
-| Skill | Leírás |
-|-------|--------|
-| `ai-fleet-project-execution` | Több-ágenses projekt koordináció (kanban, delegálás, pivot kezelés) |
-| `channel-plugin-duplicate-socket` | Socket Mode duplikáció diagnosztika és javítás |
-| `github-pr-rebase-merge` | Konfliktusos fork PR-ek rebase + merge workflow |
-
-### Seed Scheduled Tasks (`seed-scheduled-tasks/`)
-
-Előre konfigurált ütemezett feladatok:
-
-| Task | Ütemezés | Leírás |
-|------|----------|--------|
-| `kanban-audit` | 4 óránként (8, 12, 16, 20) | Kanban tábla audit: done archiválás, beakadt task detekció |
-
-### Idempotens működés
-
-- Telepítéskor és frissítéskor is lefut
-- Ha a cél mappa már létezik, kihagyja (nem írja felül a felhasználói testreszabásokat)
-- A `seed-scheduled-tasks/` fájlokban a `{{MAIN_AGENT_ID}}`, `{{INSTALL_DIR}}` stb. placeholderek automatikusan helyettesítődnek
-
-### Saját seed hozzáadása
-
-Új skill: hozz létre egy mappát `seed-skills/<skill-name>/SKILL.md` fájllal. Új scheduled task: `seed-scheduled-tasks/<task-name>/SKILL.md` + `task-config.json`. A következő `./update.sh` automatikusan telepíti.
+→ **Részletek:** [docs/skill-factory.md](docs/skill-factory.md)
 
 ## Memória rendszer
 
-Minden ágens saját memóriával rendelkezik, amit egy hibrid keresőrendszer tesz hatékonnyá. A memóriák SQLite adatbázisban élnek, három keresési réteggel.
+Minden ágens saját, réteges memóriával rendelkezik (hot / warm / cold / shared), SQLite-ban tárolva. A keresés hibrid: FTS5 full-text + szemantikus vektor (Ollama `nomic-embed-text`), RRF-fel fúzionálva. A memóriák salience decay-en mennek át (a régi, nem használt tételek halványulnak, de sosem törlődnek), és minden este napi napló készül. A `PreCompact` hook a kontextus-tömörítés előtt automatikusan elmenti a fontos döntéseket. A dashboardon gráf-nézet is van.
 
-### Tier-ek (Hot / Warm / Cold)
-
-A memória 4 szintre tagolódik, a tartalom jellegétől függően:
-
-| Tier | Mikor használjuk | Példa |
-|------|------------------|-------|
-| **hot** | Aktív feladatok, pending döntések | "Szabi kérte a piackutatást, folyamatban" |
-| **warm** | Stabil konfig, preferenciák, projekt kontextus | "Szabi tömör válaszokat szeret, nem kér bevezetőt" |
-| **cold** | Hosszútávú tanulságok, történeti döntések | "A Redis cache TTL 5 percre optimális volt az /api/users-nél" |
-| **shared** | Más ágenseknek is releváns információk | "Az aiamindennapokban.hu API kulcs a .env-ben van" |
-
-Az ágensek automatikusan döntik el, hogy egy információ melyik tierbe kerüljön:
-- Feladat kész → törlés hot-ból, napi naplóba írás
-- User preferencia → warm
-- Tanulság, döntés → cold
-- Több ágensnek is kell → shared
-
-### Hibrid keresés (FTS5 + Vektor + RRF)
-
-A memória keresés két párhuzamos csatornán fut, majd az eredményeket fúzionálja:
-
-```
-Keresési lekérdezés
-    ├── FTS5 Full-Text Search (kulcsszó alapú, SQLite natív)
-    │   └── Pontos szóegyezés, gyors, megbízható
-    │
-    ├── Vektor keresés (szemantikus, Ollama + nomic-embed-text)
-    │   └── 768 dimenziós embedding, cosine similarity
-    │   └── Megérti a jelentést, nem csak a szavakat
-    │
-    └── Reciprocal Rank Fusion (RRF, k=60)
-        └── A két lista összefésülése egy relevancia score-ral
-```
-
-**FTS5** (Full-Text Search): SQLite beépített full-text keresője. Gyors, pontos szóegyezésen alapul. Jól működik ha a felhasználó pontosan tudja mit keres.
-
-**Vektor keresés**: Minden memória mentéskor automatikusan kap egy 768 dimenziós embedding-et az Ollama `nomic-embed-text` modelljétől. A keresés cosine similarity-vel rangsorol. Megtalálja a szemantikailag hasonló tartalmakat akkor is, ha más szavakat használ.
-
-**RRF (Reciprocal Rank Fusion)**: A két keresési eredménylista összefésülése. Képlet: `score(d) = Σ 1/(k + rank)` ahol k=60. Az RRF előnye, hogy nem kell a két rendszer pontszámait normalizálni -- csak a rangsor számít.
-
-### Salience Decay (relevancia csökkenés)
-
-A memóriák frissessége idővel csökken:
-- **Első 7 nap**: nincs decay, a memória teljes relevanciával bír
-- **7 nap után**: 0.5%/nap csökkenés (`salience * 0.995`)
-- **Minimum**: 0.01 -- a memória soha nem törlődik, csak háttérbe kerül
-- **Hozzáféréskor**: +0.1 salience boost (max 5.0) -- amit gyakran keresnek, az releváns marad
-
-Ez a "gentle decay" megközelítés biztosítja, hogy a régi memóriák ne zavarják a keresést, de szükség esetén mindig visszakereshetőek legyenek.
-
-### Napi napló (Daily Log)
-
-Minden ágens append-only napi naplót vezet:
-- Automatikus bejegyzések a nap folyamán (feladat befejezés, döntések)
-- 23:00-kor automatikus napi összefoglaló generálás
-- A napló nem törlődik és nem módosul -- kronológiai archívum
-
-### Memória API
-
-Az ágensek REST API-n keresztül kezelik a memóriáikat:
-
-```bash
-# Mentés
-curl -s -X POST http://localhost:3420/api/memories \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"marveen","content":"...","tier":"warm","keywords":"kulcsszó1, kulcsszó2"}'
-
-# Keresés (kulcsszó)
-curl -s "http://localhost:3420/api/memories?agent=marveen&q=KULCSSZO&tier=warm"
-
-# Hibrid keresés (FTS5 + vektor)
-curl -s "http://localhost:3420/api/memories/search?agent=marveen&q=KERDES&hybrid=true"
-
-# Napi napló
-curl -s -X POST http://localhost:3420/api/daily-log \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"marveen","content":"## 14:30 -- Téma\nMi történt"}'
-```
-
-### PreCompact Hook (automatikus mentés)
-
-Mielőtt a Claude Code kontextusablaka tömörítődik, a `PreCompact` hook automatikusan:
-1. Átnézi az eddigi beszélgetést
-2. Kiemeli a fontos döntéseket, preferenciákat, tanulságokat
-3. Elmenti a megfelelő tierbe
-4. Napi napló bejegyzést ír
-
-Ez biztosítja, hogy a kontextus-tömörítés során semmi fontos ne vesszen el.
-
-### Gráf nézet
-
-A dashboard memória oldalán Obsidian-stílusú gráf vizualizáció érhető el:
-- Force-directed layout HTML5 Canvas-szal
-- Zoom/pan, keresés highlight
-- Kattintásra kibontható memória panel
-- A gráf a kulcsszó kapcsolatokat jeleníti meg ágensek között
-
-### Embedding backfill
-
-Régi memóriák (amik még embedding nélkül lettek mentve) automatikusan kapnak vektort:
-
-```bash
-# Manuális backfill (induláskor is automatikusan fut)
-curl -s -X POST http://localhost:3420/api/memories/backfill
-```
-
-### Konfiguráció
-
-A memória rendszer zero-config: az SQLite adatbázis automatikusan létrejön, az Ollama embedding automatikusan generálódik mentéskor. Az egyetlen opcionális függőség az Ollama + `nomic-embed-text` modell a szemantikus kereséshez -- enélkül is működik, csak FTS5-tel.
+→ **Részletek:** [docs/memory-system.md](docs/memory-system.md)
 
 ## Telepítés
 
@@ -332,31 +138,9 @@ Időzített feladatok és heartbeat monitorok beállítása:
 
 ### Vault & Titkosítás
 
-Az MCP szerverek API kulcsait, tokenjeit és jelszavait a Vault kezeli. A titkok AES-256-GCM titkosítással vannak tárolva, a master key macOS-en a Keychain-ben él (egyéb platformon fájl-alapú fallback).
+Az MCP szerverek API kulcsait, tokenjeit és jelszavait egy titkosított Vault kezeli (AES-256-GCM), a master key macOS-en a Keychain-ben (Linuxon fájl-alapú fallback). A `.mcp.json`-ben csak `vault:SECRET_ID` referenciák állnak — a plaintext kulcsok nem hevernek olvashatóan. A dashboard Vault-oldalán kezelheted a titkokat, a Scan & Import megtalálja a meglévő plaintext kulcsokat.
 
-**Miért Vault?** A Claude Code `.mcp.json` fájljai alapértelmezetten plaintext-ben tárolják az API kulcsokat és tokeneket. Ez biztonsági kockázat: a fájlok olvashatóak bármely process által, prompt injection támadással kiolvashatóak, és git-be is véletlenül bekerülhetnek. A Vault ezt úgy oldja meg, hogy a `.mcp.json`-ben csak `vault:SECRET_ID` referenciák állnak, a tényleges értékek titkosítva vannak, és csak induláskor, memóriában oldódnak fel.
-
-**Master key tárolás:**
-- **macOS**: A vault master key a macOS Keychain-ben van tárolva (`com.marveen.vault` service). A Keychain az operációs rendszer titkosított kulcstárolója -- a disk encryption részeként védett, és a felhasználói bejelentkezéshez kötött. Nem kér külön jelszót, transzparens. Ha korábban fájl-alapú kulcs volt használatban (`.vault-key`), az első induláskor automatikusan migrálódik a Keychain-be.
-- **Linux**: A Keychain nem elérhető, ezért a master key fájl-alapú (`store/.vault-key`, `chmod 600`). A titkosítás továbbra is AES-256-GCM, de a master key védelme az OS fájljogosultságokra és disk encryption-re hárul. Éles környezetben érdemes LUKS vagy hasonló disk-level titkosítást használni.
-
-**Működés:**
-- A dashboard Vault oldalán hozhatod létre és kezelheted a titkokat
-- A **Scan & Import** gomb megkeresi a `.mcp.json` fájlokban lévő plaintext titkokat és felajánlja az importálást
-- Importálás után a `.mcp.json`-ben `vault:SECRET_ID` referencia áll a plaintext helyett
-- Az MCP szerver parancs automatikusan becsomagolódik a `vault-env-wrapper.sh` scripttel, ami induláskor feloldja a referenciákat
-
-**Mit érzékel a scanner:**
-- Csak a `.mcp.json` fájlok `env` szekciójában lévő érzékeny kulcsokat (`_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, `_PASS`, `PASSWORD`, `CREDENTIAL`, `ACCESS_KEY`, `API_*`, `AUTH_*`, `OAUTH_*`)
-- Az `args`-ban átadott titkokat (pl. `--api-key`) nem érzékeli -- ezeket manuálisan kell env var-ra átállítani
-
-**Vault struktúra:**
-```
-store/vault.json          # Titkosított titkok (AES-256-GCM)
-store/vault-bindings.json # Titok ↔ MCP szerver hozzárendelések
-scripts/vault-env-wrapper.sh  # Runtime feloldó wrapper
-scripts/vault-resolve.mjs     # Secret ID → plaintext feloldás
-```
+→ **Részletek:** [docs/vault.md](docs/vault.md)
 
 ### Ágens monitorozás
 
