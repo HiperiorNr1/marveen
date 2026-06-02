@@ -17,6 +17,7 @@ import {
   scheduleIdentitySetup,
 } from './agent-process.js'
 import { reapChannelOrphans } from './channel-poller-reap.js'
+import { matchesProviderPollerCmd } from './channel-poller-liveness.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import { detectPaneState, decidePaneErrorAlert, type PaneErrorAlertState, type PaneState } from '../pane-state.js'
@@ -95,15 +96,10 @@ function hasChannelPluginAlive(claudePid: number, providerType: ChannelProviderT
       if (seen.has(p)) continue
       seen.add(p)
       const cmd = cmdOf.get(p) || ''
-      if (providerType === 'telegram') {
-        if (cmd.includes('/telegram/') && cmd.includes('bun')) return true
-        if (/\bbun\b/.test(cmd) && cmd.includes('server.ts')) return true
-      } else if (providerType === 'discord') {
-        if (cmd.includes('discord') && (cmd.includes('node') || cmd.includes('bun'))) return true
-      } else {
-        if (cmd.includes('slack') && cmd.includes('node')) return true
-        if (cmd.includes('slack-channel') && (cmd.includes('bun') || cmd.includes('node'))) return true
-      }
+      // Provider-specific cmd-match (telegram /telegram/+bun, discord
+      // discord+node|bun, slack slack+node|bun). Single source of truth in
+      // channel-poller-liveness.ts so the unlock probe stays consistent.
+      if (matchesProviderPollerCmd(cmd, providerType)) return true
       for (const k of (childrenOf.get(p) || [])) stack.push(k)
     }
 
