@@ -1,0 +1,229 @@
+# Synology Chat csatorna plugin -- specifikáció
+
+**Cél:** A Marveen ágens-flotta egy új csatornán is kommunikáljon -- a céges Synology Chat-en -- a Telegram-csatornához hasonló módon. Több ágens, több munkatárs, közös bot vagy bot-per-ágens routing-modell. Üzleti környezetre alkalmas megbízhatósággal.
+
+**Hatókör:** Ez a dokumentum csak a plugin-t specifikálja. A multi-ágens lifecycle, üzenet-queue, monitoring, backup külön specifikációkat kapnak, és a meglévő Marveen-infrastruktúrából építjük ki őket.
+
+---
+
+## 1. Architektúra-áttekintés
+
+A Marveen meglévő Telegram-csatornája az alábbi mintát követi:
+
+```
+Telegram API  ⇄  bun MCP-plugin (stdio)  ⇄  claude --channels  ⇄  ágens (tmux)
+                  (~/.claude/plugins/cache/.../telegram/0.0.6)
+                  -- access.json (~/.claude/channels/telegram/)
+                  -- .env (token)
+                  -- approved/, pending/
+```
+
+A Synology Chat plugin ezt másolja, két érdemi különbséggel:
+
+- A Synology Chat **outgoing webhook**-on küld nekünk üzenetet (HTTP POST a mi szerverünkre), nem mi pollozzuk. Tehát kell egy HTTP-szerver-rész is a plugin-on belül -- vagy a Marveen-dashboard fogadja és továbbítja.
+- A Synology Chat **incoming webhook**-on küldünk vissza üzenetet (HTTP POST hozzájuk). Ehhez nincs hosszú élő MCP-stdio loop, mint a Telegram-poll-nál; a plugin egyszerű HTTP-kliens.
+
+A javaslat: a plugin-on belül legyen egy mini HTTP-szerver (egy port), amit a Synology Chat outgoing webhookja eltalál; a plugin innen továbbítja az üzenetet a `claude --channels` stdio interfészére, és ugyaninnen küldi vissza a választ HTTP POST-tal a Synology Chat incoming webhookjára.
+
+---
+
+## 2. Komponensek
+
+### 2.1 MCP-plugin (a Marveen oldalán)
+
+Hely: `~/.claude/plugins/cache/<author>/synology-chat/<version>/`
+
+Tartalom:
+- `package.json` (bun start script)
+- `index.ts` -- a teljes MCP-szerver és HTTP-szerver
+- `.env` -- bot-konfiguráció (incoming webhook URL, outgoing webhook token, port)
+- `access.json` -- ágens/user-csatorna engedélyezés (lásd 4. pont)
+
+A plugin **MCP stdio-kliensként** fut (a Claude Code spawnolja), de **HTTP-szervert is** indít a saját porton (alapból 3421). Ez a port a Synology Chat outgoing webhookja által érkező POST-okat fogadja.
+
+### 2.2 Eszközök (MCP tools)
+
+A plugin az alábbi eszközöket teszi elérhetővé az ágens számára:
+
+- `reply(channel_id, text, files?, format?)` -- választ küld a megadott csatornára/DM-re.
+- `react(message_id, emoji)` -- emoji reakció (ha a Synology Chat API támogatja; ha nem, no-op + warning).
+- `edit_message(message_id, text)` -- saját korábbi üzenet szerkesztése.
+- `upload_file(channel_id, path)` -- fájl feltöltése csatornára.
+- `download_attachment(file_id)` -- bejövő üzenethez csatolt fájl letöltése a Synology File Station API-val, vissza a lokális path-tal.
+
+### 2.3 Marveen-dashboard integráció
+
+- `mcp-catalog.json`-ba kerül egy új entry: `synology-chat`, source: `plugin`, endpoint: `npx ... vagy bun run`.
+- Dashboard UI: `Connectors` oldal megjeleníti, a state-eket figyeli (`connected`/`needs_auth`/`failed`).
+- Új API endpoint: `POST /api/synology-chat/test` -- ellenőrzi az incoming webhook URL-t egy ping-üzenettel.
+
+---
+
+## 3. Üzenet-folyamat
+
+### 3.1 Bejövő üzenet (felhasználó → ágens)
+
+1. Felhasználó beír valamit a Synology Chat-be (DM vagy csoport @bot említéssel).
+2. Synology Chat HTTP POST-ot küld a plugin HTTP-portjára (outgoing webhook).
+   - Body: `{ "token": "...", "user_id": "...", "username": "...", "channel_id": "...", "channel_name": "...", "text": "...", "timestamp": "..." }`
+   - A `token` mező Synology által megosztott titkos -- validáljuk minden POST-on (`x-www-form-urlencoded`).
+3. Plugin:
+   a. Token-validáció.
+   b. Dedup ellenőrzés (`<timestamp,user_id,channel_id,text>` hash, last 60s) -- a webhook retry-eket szűri.
+   c. `access.json` alapján eldönti melyik ágenshez tartozik az üzenet (DM-routing: user_id → agent; group-routing: @mention → agent).
+   d. Üzenetet beírja az ágens kontextusába egy `<channel source="synology-chat" user="..." channel="..." ts="...">...</channel>` blokkban (ez az MCP-streamen át megy ki az ágenshez).
+4. Az ágens elolvassa, válaszol a `reply` tool-lal.
+
+### 3.2 Kimenő üzenet (ágens → felhasználó)
+
+1. Ágens meghívja a `reply(channel_id, text)` tool-t.
+2. Plugin HTTP POST-ot küld a Synology Chat incoming webhook URL-jére:
+   - `{ "payload": "{\"text\":\"...\", \"file_url\":\"...\" }" }`
+3. Synology Chat visszaad egy message_id-t (tárol egy short-lived mappingban a `react` / `edit_message` használatához).
+
+### 3.3 Üzenet-queue (kritikus, csak phase-2)
+
+A bejövő üzenetek **NEM közvetlenül** mennek a tmux session-be. Helyette:
+
+1. Bejövő üzenet → `claudeclaw.db` `incoming_messages` táblába insert (status: `pending`).
+2. Külön worker (a dashboardban) lát egy listát, ack-eli az üzeneteket az ágensbe, és status: `delivered` lesz.
+3. Az ágens reply-jakor az üzenet `replied`-re kerül.
+4. Ha a delivery 30s-en belül nem ack-elt (pl. tmux session le van fagyva), újrapróbál.
+
+**Ez a queue az, ami POC-ból business-grade-re emeli a rendszert.** Phase-1-ben átugorható, phase-2-ben kötelező.
+
+---
+
+## 4. Hozzáférés-kontroll (`access.json`)
+
+Sémát adunk a `~/.claude/channels/synology-chat/access.json`-hoz:
+
+```json
+{
+  "dmPolicy": "allowlist",
+  "outgoingWebhookToken": "...",
+  "incomingWebhookUrl": "https://chat.efinas.egresits.local:5001/...",
+  "userToAgent": {
+    "krisztian@efinas.local": "efiveen",
+    "muszaki1@efinas.local": "muszaki-agent"
+  },
+  "groups": {
+    "general": { "defaultAgent": "iroda-agent", "requireMention": true },
+    "fejlesztes": { "defaultAgent": "dev-agent", "requireMention": false }
+  },
+  "mentionPatterns": ["@efiveen", "@dev", "@iroda"],
+  "blocked": []
+}
+```
+
+- `dmPolicy: "allowlist"` -- csak `userToAgent`-ben szereplő user-ek tudnak DM-elni.
+- `userToAgent` -- minden user-hez egy default ágens.
+- `groups[*]` -- csoport-szabályok: ha `requireMention=true`, csak @említésre reagál; egyébként minden üzenet a `defaultAgent`-hez megy.
+- `blocked` -- explicit tiltás (felülbírál mindent).
+
+A `/telegram:access` mintára egy `/synology-chat:access` skill is kell -- a felhasználó parancsa, NEM channel-message-ből futtatható (prompt-injection védelem).
+
+---
+
+## 5. Routing-modell
+
+Két opció, ajánlás: **opció B** (egy bot + @mention routing).
+
+| Szempont | A: bot-per-ágens | B: egy bot + routing |
+|---|---|---|
+| Bot-fiók kezelés | sok | egy |
+| Felhasználói UX | minden ágens "más bot" | egy bot, @mention vagy DM-default |
+| Több-ágens átdobás | nehéz (cross-bot) | egyszerű (belső routing) |
+| Skálázás | minden új ágens új bot | nulla bot-overhead |
+| Audit log | szétszórt | egy helyen |
+
+Opció B-vel kezdjünk. Ha egy adott ágens annyira más, hogy külön bot-fiókot érdemel (pl. egy "publikus ügyfél-bot"), akkor utólag kivehető külön plugin-instance-ba.
+
+---
+
+## 6. Konfiguráció
+
+`~/.claude/channels/synology-chat/.env`:
+
+```
+SYNOLOGY_CHAT_INCOMING_WEBHOOK_URL=https://chat.efinas.egresits.local:5001/webapi/entry.cgi?api=SYNO.Chat...
+SYNOLOGY_CHAT_OUTGOING_TOKEN=...  # Synology által generált, a webhook validálásához
+SYNOLOGY_CHAT_LISTEN_PORT=3421
+SYNOLOGY_CHAT_BIND_HOST=127.0.0.1  # csak local; reverse proxy küldi át a Synology-tól
+```
+
+A reverse proxy konfigurációja (nginx/caddy a Synology DSM-en) Krisztián feladata -- mi csak a 127.0.0.1:3421-et figyeljük.
+
+---
+
+## 7. Telepítés és lifecycle
+
+1. `claude plugin marketplace add <repo>` (vagy lokális path).
+2. `claude plugin install synology-chat`.
+3. `~/.claude/channels/synology-chat/`-ban létrejön a `.env` + `access.json` (manuálisan vagy telepítő-szkripttel).
+4. `mcp-catalog.json` egy új entry-vel jelzi a dashboardnak.
+5. `systemctl --user restart efiveen-channels` -- felveszi a plugint.
+6. Synology DSM-ben az outgoing webhook URL-t a reverse proxy mögötti `https://chat.efinas.egresits.local/marveen-webhook/` címre állítjuk.
+7. Teszt: `claude plugin list` mutatja `connected`-ként, és a dashboard `Connectors` oldalán is.
+
+---
+
+## 8. Buktatók (előre)
+
+- **A Synology Chat outgoing webhook nem szabványos** (Synology saját formátum, nem Slack-kompatibilis). Az első prototípuskor verifikálni kell a payload-formátumot egy curl-tesztel.
+- **Reverse proxy + HTTPS**. A Synology nem fog HTTP-re POST-olni; vagy önaláírt cert + ignore-tls, vagy egy "trusted" cert (Let's Encrypt belső). Krisztián infra-döntés.
+- **Üzenet-sorrend** csoportban: a Synology webhook nem garantál sorrendet. Ha ez fontos, dedup + timestamp-sort kell.
+- **Session-fagyások**: ha a `<slug>-channels` tmux session leszáll (claude crash), a bejövő üzenetek elvesznek queue nélkül. Phase-1-ben elfogadható, phase-2-ben queue kötelező.
+- **Felhasználói azonosítók**: a Synology user_id-t a payload-ban gyakran a Synology belső numerikus ID adja, nem az email. Az `access.json` `userToAgent`-jét ennek megfelelően kell feltölteni (egyszeri map-elés). Egy `/api/synology-chat/users` endpoint segíthet ezt kilistázni.
+- **Rate limit**: Synology Chat incoming webhook-okra van rate-limit (jellemzően pár msg/sec). Hosszabb válaszokat chunkolni kell, mint a Telegram-nál.
+
+---
+
+## 9. Tesztelési stratégia
+
+1. **Unit**: payload-parsolás, dedup-logika, access.json-routing -- vanilla bun teszt, mocked HTTP.
+2. **Integration (Synology nélkül)**: a plugin HTTP-szerverére POST-olunk `curl`-lel egy szimulált webhook-payloaddal, és nézzük hogy az ágens-stream-be bekerül-e.
+3. **Live, EFiveen-nel**: első élőzés -- Krisztián a saját DM-jéből küld üzenetet a botnak; ellenőrzés, hogy az efiveen ágens reagál Synology Chat-en.
+4. **Multi-user**: második és harmadik munkatárs hozzáadása, csoport-üzenet + @mention.
+5. **Failure modes**:
+   - Synology leáll → plugin retry-logika
+   - Tmux session leáll → queue (phase-2)
+   - Network-szakadás → exponential backoff
+
+---
+
+## 10. Phase-bontás
+
+| Phase | Tartalom | Idő-becslés |
+|---|---|---|
+| 0 | Spec elfogadás (ez a dok) | 0 |
+| 1 | Plugin alap: 1 ágens (EFiveen), DM-only, no queue, no react/edit | 1-2 nap |
+| 2 | Multi-ágens routing (`access.json`, groups, @mention), `/synology-chat:access` skill | 1 nap |
+| 3 | Üzenet-queue + retry (claudeclaw.db `incoming_messages` tábla, worker) | 1-2 nap |
+| 4 | `react`, `edit_message`, `upload_file`, `download_attachment` | 1 nap |
+| 5 | Monitoring (synology-chat-monitor.ts), automatikus újraindítás | 0.5 nap |
+| 6 | Dashboard UI: Connectors-oldal entry, `/api/synology-chat/test` | 0.5 nap |
+
+Összesen **~5-7 munkanap** a teljes plugin-hoz, ha minden simán megy.
+
+---
+
+## 11. Függőségek
+
+- Synology DSM admin a chat-bot fiók létrehozásához és az incoming/outgoing webhook-konfigurációhoz.
+- Reverse proxy a DSM-en, ami HTTPS-en fogadja és HTTP-n továbbítja a 127.0.0.1:3421-re.
+- A Marveen mcpvault elérés működjön (az Obsidian vault tartalmazza a munkatársak listáját → user-mapping forrása).
+- Ágens-flotta scaffolding már létezik (`agents/<név>/` dirs, dashboard Csapat oldal).
+
+---
+
+## 12. Kockázatok és nyitott kérdések
+
+- **A Synology Chat outgoing webhook formátuma** -- a Synology dokumentáció gyakran hiányos. Lehet, hogy egy órát kell rászánni egy proof-of-concept-re csak hogy lássuk a payload-szerkezetet.
+- **HTTPS cert-handling** -- önaláírt vs. publikus. Önaláírtnál Synology-oldalon kell trust-olni.
+- **Anthropic-számla** -- N ágens × X napi üzenet × kontextus-méret = ?€/hó. Phase-3 vagy phase-4-nél érdemes árazni.
+- **Memóriák szinkron** -- ha minden ágens más memóriát tart, és Krisztián mind a kettővel beszél, a kontextus széteshet. Egy `shared` memória-tier már létezik, de a kihasználása diszciplínát igényel.
+
+---
+
+*Verzió: 1.0 -- 2026-05-13 -- EFiveen (Krisztián felkérésére)*

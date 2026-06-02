@@ -1,0 +1,1 @@
+/mnt/efinas-AI/Obsidian/AI-Memory-Hub/projects/Synology-Chat-Plugin/01_Plugin_Spec.md

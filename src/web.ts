@@ -12,6 +12,7 @@ import { startMessageRouter } from './web/message-router.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
+import { startSynoChatWorker } from './web/synochat-worker.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { logger } from './logger.js'
@@ -214,6 +215,9 @@ export function startWebServer(port = 3420): http.Server {
 
   const updateCheckerInterval = startUpdateChecker()
   logger.info('Update checker started (15min poll)')
+
+  const synoChatWorkerInterval = startSynoChatWorker()
+  logger.info('SynoChat worker started (5s poll, queue->agent bridge)')
 
   // Warm the MCP list cache so the Connectors page reflects claude.ai OAuth
   // connectors on first load. 30s delay lets the main-channels session settle

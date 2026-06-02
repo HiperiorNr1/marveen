@@ -1,0 +1,162 @@
+# EFi Kft -- Fejlesztési stack-preferenciák
+
+**Cél:** Egységes, hosszú távú technológiai döntések az EFi Kft minden fejlesztési munkájához. Minden új ágens (és minden új fejlesztő-bevezetés) ezt veszi alapul.
+
+**Vezérelv:** *Boring over exciting.* Két fő stack maximum, mindkettő érett. Static-first ahol lehet. A meglévő infrastruktúra és skill-készlet kihasználása. Minden új technológia (3.) bekerülése indoklást igényel.
+
+**Utolsó frissítés:** 2026-05-13
+
+---
+
+## 0. Domainek és default stack-ek
+
+| Domain | Stack | Indok |
+|---|---|---|
+| **Üzleti / ERP / projekt / webshop / portál** | **Odoo 18.0 Community** (Python + Odoo ORM + XML view + OWL JS) | Központi rendszer; a "kell egy webapp" kérdés default válasza. Ne építsünk SvelteKit-ben olyat, amit az Odoo megold. |
+| **AI / ágensek / Marveen-ökoszisztéma** | **TypeScript + Node/bun + better-sqlite3** | A meglévő Marveen ezt használja. Új plugin / dashboard-bővítés ide tartozik. |
+| **Workflow-automatizálás, integráció** | **n8n** (JSON workflow, JS Function-node-okban ha kell) | Self-hosted, vizuálisan szerkeszthető. Bridge Odoo ↔ Marveen ↔ Synology Chat ↔ email/SMS. |
+| **Dokumentum-generálás, scriptek, könyvtár-igényes** | **Python 3.11+** (uv pkg-manager) | ODT/PDF/Excel/képfeldolgozás. Már megvan az alapja (`egresits-sablon/create_odt.py`). |
+| **Statikus céges oldal** | **Odoo Website modul** (default); ha kinövik: Astro + Tailwind külön Hetzneren | Egy admin felület, integrált a webshop-pal és a kontakt-listával. |
+| **Mobil** | **Responsive Odoo screens** (a Field Service modul a terepi szerelőknek elég) | Natív app csak ha az Odoo mobile képtelen valamire. |
+
+A két fő stack a **TypeScript** és a **Python**. Minden más vagy ezekre épül (Odoo = Python+, n8n = JSON+JS), vagy kivételes eset.
+
+---
+
+## 1. Adatbázis
+
+- **Odoo:** PostgreSQL (Odoo kötelmező)
+- **Marveen:** SQLite (`store/claudeclaw.db`) -- single-file, NAS-rsync backup-friendly
+- **Új belső szolgáltatás:** SQLite default; Postgres csak ha multi-tenant, vagy nagy concurrent-write
+- Sem MySQL, sem MongoDB nincs előlátva. Új DB-engine bevezetése írásos indoklást igényel.
+
+---
+
+## 2. Hosting / deployment
+
+- **Belső szolgáltatások** (Marveen, Odoo, n8n, csatorna pluginok): a meglévő **ESXi + Synology** infra, Portainer-en Docker-konténerekkel vagy direkt systemd unit-okkal.
+- **Publikus webshop / céges weboldal:** **Hetzner CPX31** VPS (vagy később CPX21 a pilot-hoz), Cloudflare előtt CDN-nek.
+- **Statikus oldal (ha külön):** Cloudflare Pages (ingyenes) vagy DSM Web Station.
+- **NEM kell Docker mindenhova.** Egyszerű Node/Python szolgáltatás systemd unitban tisztább, mint Docker.
+- **NEM kell Kubernetes.** 8-15 fős cégnek soha.
+- **NEM kell CI/CD-pipeline a 2. naptól.** GitHub Actions-t építünk, amikor 3 fős a dev-csapat (most 0).
+
+---
+
+## 3. Verziókövetés és kód-minőség
+
+- **Git, GitHub** (vagy Gitea ha self-host kell)
+- **main branch védett**, közvetlen push tiltott
+- **Feature branch + Pull Request** workflow
+- **Review skill / `review` skill futtatása** minden PR-on
+- **`security-review` skill** ha érzékeny területet érint (auth, vault, network)
+- **Tesztek**: új feature mellé teszt (vagy explicit "no test" indoklás)
+- **Commit message**: a "miért" mindig benne van; a "mit" a diff-ből kiolvasható
+- **Verzió pinning**: minden függőség pinelve (npm: package-lock.json elkötelezve; Python: uv lock; n8n: workflow JSON-okat git-be)
+
+---
+
+## 4. Tesztelés
+
+- **TypeScript:** vitest (a Marveen ezt használja)
+- **Python:** pytest + pytest-asyncio ha kell
+- **Odoo:** Odoo saját test-framework + odoo-bin pytest integráció
+- **Integráció:** valódi DB-vel, nem mock-kal (a Marveen-konvenció szerint)
+- **E2E webfront:** Playwright csak ha érdemi UI-flow-t kell tesztelni
+
+---
+
+## 5. AI / LLM
+
+- **Cloud LLM:** Anthropic Claude API (a `claude-api` skill mintájára), prompt-caching kötelező
+- **Helyi LLM:** Ollama (Mac Studio M4 Max + Ascent GX10 értékelés alatt), `nomic-embed-text` már be van állítva a Marveen embedding-hez
+- **Anonimizálás cloud-ra küldés előtt:** Microsoft Presidio (érzékeny adatra)
+- **Modell-választás:** Claude Opus a stratégiai/komplex feladatokra, Sonnet a default agent-modellre, Haiku az egyszerű routing-feladatokra. A modell-ID a CLAUDE.md-ben rögzítve, ne hardcode-old kódba.
+- **Egyetlen LLM-provider**: az architektúrában csak Anthropic. OpenAI/Google/stb. csak ha specifikusan szükséges (pl. Whisper a Speech-to-Text-re az OK).
+
+---
+
+## 6. Frontend (ha kell)
+
+- **Odoo nézetek**: XML + OWL (Odoo saját)
+- **Statikus oldal**: Odoo Website default; Astro + Tailwind csak ha kell
+- **Külön webapp** (ritka): SvelteKit + Tailwind
+- **CSS keretrendszer**: Tailwind mindenhol, nem mixelünk Bootstrap + Material-UI-t
+- **NEM használunk** jQuery-t, Bootstrap-et új projektben
+- **Plain HTML + vanilla JS** kis dashboard-okra (mint a Marveen `web/`) tökéletes
+
+---
+
+## 7. Egységes elvek minden stackre
+
+- **UTF-8 mindenhol** (forrásfájl, DB-charset, file I/O default)
+- **Timezone-aware datetime**, Europe/Budapest a default, ISO 8601 a serialize-formátum
+- **Magyar locale UI** mindenhol az ágenseknek (kollégáknak), angol locale a kódban / commit message-ekben / belső docs-ban
+- **Logok strukturáltan** (pino TS-ben, structlog Python-ben), JSON-formátum production-ben
+- **Hibakezelés csak rendszerhatáron** (user input, külső API, hálózat). Belső kódban trust.
+- **Minimális komment**: ne magyarázd MIT csinál a kód (kiolvasható), magyarázd MIÉRT (nem-nyilvánvaló döntések, workaround-ok)
+- **Ne over-engineer-elj**: 3 hasonló sor jobb mint egy prematúr absztrakció. Backwards-compat shim-ek csak ha tényleg kellenek.
+
+---
+
+## 8. Hangerő / commit-stílus
+
+- **Commit message-eknél angolul**: konvencionális commit nem kötelező, de a `feat:` / `fix:` / `docs:` / `refactor:` prefix segít.
+- **PR-leírás magyarul vagy angolul**, ahogy a felülvizsgáló kéri. Krisztiánnal magyarul, csapatos commit-történet angolul.
+- **Egy commit = egy logikai változás**. Squash a merge-nél.
+
+---
+
+## 9. Odoo-specifikus konvenciók
+
+- **Sosem módosítjuk az Odoo core-t**. Csak addonokat fejlesztünk, mindig saját namespace-szel (pl. `efi_*` prefix).
+- **Manifest** (`__manifest__.py`) mindig kitöltve: name, version (1.0.0 → 18.0.1.0.0 minta), author, license (AGPL-3 a community-kompatibilitáshoz), depends.
+- **Migrációk**: minden schema-változás `migrations/<version>/post-migrate.py` fájlba.
+- **Tesztek**: Odoo `tagged()` dekorátorokkal csoportosítva, gyors smoke-tesztek `at_install=True`-val, lassabbak `post_install=True`-val.
+- **OWL komponensek**: `static/src/` alá, ES6 modulokba.
+- **Verzió-megfeleltetés**: a `manifest.version` mindig kezdődjön `18.0.`-vel.
+- **Field Service modul Enterprise-trigger** marad (a KB szerint): a community-addon "FSM" alternatívák szóba jöhetnek, de értékelés tárgya.
+
+---
+
+## 10. n8n-specifikus konvenciók
+
+- **JSON-only workflow-k**, Function node-ban JS csak ha tényleg kell
+- **Workflow JSON-ok git-be commitálva** (n8n credentials kivéve, azokat env-ből)
+- **Webhook URL-eket** ne hardcode-olj kódba, vault-ból (`/api/vault/<id>`)
+- **Hiba-route**: minden workflow-ban egy "Error Trigger" branch, ami értesít a Synology Chat-be vagy Marveen-be
+
+---
+
+## 11. Marveen-specifikus konvenciók
+
+- **Csatorna plugin-ok** bun MCP-stdio mintát követik (lásd Telegram plugin)
+- **Új feladat:** `scheduled-tasks/<név>/SKILL.md` + `task-config.json`, placeholderekkel (`{{MAIN_AGENT_ID}}` stb.)
+- **Új ágens:** dashboard "Csapat" oldalon scaffoldolva, vagy `agents/<név>/` kézzel + dashboard register
+- **NE módosítsd közvetlenül** az SQLite-t (`store/claudeclaw.db`), használd a `/api/*` endpointokat. (A `scheduled_tasks` tábla pl. régi API.)
+- **Inter-agent üzenet:** `/api/messages` endpoint, NE tmux send-keys közvetlenül
+
+---
+
+## 12. Tiltott lista (új projekthez)
+
+- ❌ jQuery, Bootstrap (új front-end-ben)
+- ❌ MongoDB, MySQL (új DB-választáshoz)
+- ❌ Docker Compose 30 service-szel (egyszerűsítsd)
+- ❌ Kubernetes (kis cégnek)
+- ❌ Microservice-architektúra (mielőtt monolith-ban dolgoznánk)
+- ❌ GraphQL (REST/RPC tisztább a méretünkben)
+- ❌ NoSQL premature optimization
+- ❌ Bash mint programozási nyelv 100 sor fölött (váltsd Python-ra)
+
+---
+
+## 13. Mikor kérünk újragondolást ezekkel
+
+- Ha 3 új projekt mind ugyanaba a "nem fér bele a default" kategóriába esik → frissítsük a doksit
+- Ha a meglévő ágens-flotta panaszkodik egy stackre (Marveen napi naplók, daily logok) → review
+- Ha Krisztián stratégiai változást szignal -- ez a doksi a stack-ek szintű döntésekért felel, az üzleti kontextus az `EFi_KB_*.md` doksikban él
+
+---
+
+*Karbantartó: dev-ágens (egyszer létrejön); review-er: EFiveen + Krisztián*

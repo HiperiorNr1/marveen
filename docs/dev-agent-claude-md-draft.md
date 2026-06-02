@@ -1,0 +1,1 @@
+/mnt/efinas-AI/Obsidian/AI-Memory-Hub/projects/Synology-Chat-Plugin/03_Dev_Agent_CLAUDE_md.md
