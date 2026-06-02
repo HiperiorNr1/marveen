@@ -19,9 +19,11 @@
 //
 // This module is the in-process equivalent of the channels.sh probe.
 // schedulePluginUnlockAfterRespawn() is fire-and-forget from the JS respawn
-// paths; it waits past the cold-start window, gates on `pgrep -P <claude_pid>
-// bun` (no bun = plugin is not running), and if it needs to act, sends the
-// same /mcp + Up + Enter + Enter sequence. The Up wraps to the bottom of the
+// paths; it waits past the cold-start window, gates on a provider-scoped
+// liveness check (hasProviderPoller in channel-poller-liveness.ts: no
+// matching poller under the claude pid = this provider's plugin is not
+// running), and if it needs to act, sends the same /mcp + Up + Enter +
+// Enter sequence. The Up wraps to the bottom of the
 // MCP server list (where plugin:<provider>:<provider> lives), the first Enter
 // opens its action menu, and the second Enter selects whichever first action
 // is offered - "Enable" for disabled, "Reconnect" for failed. Both revive
@@ -36,6 +38,7 @@ import { execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import type { ChannelProviderType } from '../channel-provider.js'
+import { hasProviderPoller } from './channel-poller-liveness.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -82,29 +85,17 @@ function getSessionClaudePid(session: string): number | null {
 }
 
 // True iff at least one `bun` child is reparented under the claude pid -
-// the plugin spawns its poller as a direct subprocess of the claude main
-// loop, so bun's presence under the claude pid is the most reliable
-// liveness signal we have. Matches the channels.sh `pgrep -P <claude_pid>
-// bun` check so the two paths agree on what "plugin running" means.
-function hasBunChild(claudePid: number): boolean {
-  try {
-    const out = execFileSync('/usr/bin/pgrep', ['-P', String(claudePid), 'bun'], {
-      timeout: 3000,
-      encoding: 'utf-8',
-    }).trim()
-    return out.length > 0
-  } catch {
-    // pgrep exits 1 when there are no matches; treat as "no bun child"
-    return false
-  }
-}
-
 // Captured pane lines we use to refuse the keystrokes. Two safety gates:
 // (a) the session must be at the bypass-permissions footer (the TUI's idle
 // state). If we still see the modal/dialog prompt or the Resume-from-summary
 // screen, the unlock keystrokes would land in the wrong context. (b) we
-// never send keystrokes if `bun` *is* running - that would risk toggling
-// the plugin into Disable, exactly the 2026-06-01 18:55 root cause.
+// never send keystrokes if this provider's poller *is* running - that would
+// risk toggling the plugin into Disable, the 2026-06-01 18:55 root cause.
+// Note: liveness uses hasProviderPoller (provider-specific DFS under the
+// claude pid) instead of `pgrep -P <pid> bun`. With two channel plugins
+// enabled (e.g. telegram + synology-chat), the bare bun check counted the
+// other plugin's bun child as "healthy" and silently skipped unlock for the
+// dead provider (telegram-reconnect-loop-fix-2026-06-02).
 function isSessionReadyForUnlock(session: string): boolean {
   try {
     const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], {
@@ -175,10 +166,10 @@ function runUnlockProbe(state: UnlockProbeState): void {
     return
   }
 
-  if (hasBunChild(claudePid)) {
+  if (hasProviderPoller(claudePid, state.provider)) {
     logger.info(
       { session: state.session, claudePid, provider: state.provider },
-      'channel-plugin-unlock: bun child present, plugin healthy - no unlock needed',
+      'channel-plugin-unlock: provider poller present, plugin healthy - no unlock needed',
     )
     return
   }
@@ -198,7 +189,7 @@ function runUnlockProbe(state: UnlockProbeState): void {
 
   logger.warn(
     { session: state.session, claudePid, provider: state.provider },
-    'channel-plugin-unlock: bun child absent after cold-start window, firing /mcp unlock sequence',
+    'channel-plugin-unlock: provider poller absent after cold-start window, firing /mcp unlock sequence',
   )
   sendUnlockKeystrokes(state.session)
 }
@@ -209,16 +200,19 @@ function runUnlockProbe(state: UnlockProbeState): void {
  * Call this fire-and-forget right after `tmux respawn-pane` in any in-process
  * recovery path (resumeMarveenSession, respawnMarveenSessionFresh, etc.).
  * The probe waits for the new claude session to finish cold-starting, then
- * checks `pgrep -P <claude_pid> bun`:
- *   - bun child present: plugin healthy, do nothing.
- *   - bun child absent + idle pane: send /mcp + Up + Enter + Enter to
+ * checks hasProviderPoller(claudePid, provider) -- a DFS under the claude
+ * pid for a process whose command matches THIS provider's poller signature
+ * (NOT a bare `pgrep -P bun`, which would mistake another channel-plugin's
+ * bun child for "this plugin is healthy"):
+ *   - provider poller present: plugin healthy, do nothing.
+ *   - provider poller absent + idle pane: send /mcp + Up + Enter + Enter to
  *     enable or reconnect whichever channel plugin is at the bottom of
  *     the MCP list.
- *   - bun child absent + non-idle pane: retry up to UNLOCK_PROBE_MAX_RETRIES
+ *   - provider poller absent + non-idle pane: retry up to UNLOCK_PROBE_MAX_RETRIES
  *     times every UNLOCK_PROBE_RETRY_DELAY_MS before giving up.
  *
  * Idempotent across multiple respawns - each call schedules its own setTimeout
- * and the unlock-keystrokes path is itself gated on bun absence, so a stale
+ * and the unlock-keystrokes path is itself gated on poller absence, so a stale
  * probe from a previous respawn cannot toggle a healthy plugin to Disable.
  */
 export function schedulePluginUnlockAfterRespawn(session: string, provider: ChannelProviderType): void {
