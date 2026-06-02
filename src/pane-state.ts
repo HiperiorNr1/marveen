@@ -47,7 +47,13 @@ export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 //       happens to contain "bypass permissions on · 1 shell" verbatim
 //       (an echoed log line, a quoted message, etc.) which would
 //       otherwise be misread as idle.
-const IDLE_FOOTER_RX = /bypass permissions on(?: \(shift\+tab to cycle\)| · \d+ shells? · (?:ctrl\+t|↓ to manage))|\? for shortcuts/
+//
+// Newer Claude Code builds wedge extra footer segments between the shell
+// count and the tail, e.g. "· 1 shell · ← for agents · ↓ to manage". We
+// allow any same-line filler ([^\n]*?) between the count and the tail so
+// the segment ordering can grow without breaking idle detection; the
+// mandatory tail marker still guards against the scrollback false positive.
+const IDLE_FOOTER_RX = /bypass permissions on(?: \(shift\+tab to cycle\)| · \d+ shells?\b[^\n]*?(?:ctrl\+t|↓ to manage))|\? for shortcuts/
 
 // Positive busy signals. ANY match anywhere in the pane means the turn
 // is mid-flight, even if the footer looks idle for a frame.
