@@ -4,6 +4,8 @@ import {
   type AgentMessage,
 } from '../../db.js'
 import { logger } from '../../logger.js'
+import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
+import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
@@ -15,6 +17,26 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     const { from, to, content } = JSON.parse(body.toString()) as { from: string; to: string; content: string }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
+      return true
+    }
+    // Security: the channel-coordinator id grants channel-inbound delivery
+    // (verbatim <channel> + reply-expected framing) in the message-router. The
+    // ONLY legitimate writer of that id is the in-process coordinator, which
+    // inserts directly into the DB -- it never POSTs here. The dashboard token
+    // is readable by every sub-agent, so without this guard any sub-agent could
+    // forge a reply-expected message addressed at the main agent. Reject it.
+    //
+    // CRITICAL: normalize with the EXACT function the router matches on
+    // (sanitizeAgentIdent), NOT from.trim(). The router does
+    // CHANNEL_COORDINATOR_AGENTS.has(sanitizeAgentIdent(from)), and
+    // sanitizeAgentIdent STRIPS [^a-zA-Z0-9_-] rather than trimming. A bypass
+    // like from="@telegram-coordinator" / "telegram-coordinator." survives
+    // .trim() (!= the constant) yet sanitizes to "telegram-coordinator" in the
+    // router -> channel-inbound with an attacker-controlled body. Matching the
+    // router's normalization here closes that asymmetry.
+    if (sanitizeAgentIdent(from) === COORDINATOR_AGENT_ID) {
+      logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST forging channel-coordinator id')
+      json(res, { error: 'from is reserved for the in-process channel coordinator' }, 403)
       return true
     }
     const msg = createAgentMessage(from.trim(), to.trim(), content.trim())
