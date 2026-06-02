@@ -59,28 +59,53 @@ import {
   chooseSubmenuTarget,
 } from '../web/channel-mcp-reconnect.js'
 
-// Submenu panes Claude Code renders for each plugin state. The `❯` marks the
-// row the cursor sits on when the submenu first opens (top row).
+// Submenu panes Claude Code 2.1.160 renders for each plugin state, captured
+// verbatim from a live TUI (hexdump-confirmed glyphs: connected ✔ U+2714,
+// failed ✘ U+2718, disabled ◯ U+25EF). Two things the OLD fixtures missed and
+// which silently regressed the navigator (2026-06-02 reconnect-loop):
+//   1. The `/mcp` slash command stays echoed in the INPUT line at the top of
+//      the pane as `❯ /mcp` -- a leading `❯` that is NOT the menu cursor.
+//   2. Action rows are NUMBERED (`1. Reconnect`), and the cursor `❯` sits on
+//      a numbered row.
+// The menu cursor must be read from the numbered row, never the input echo.
 const SUBMENU_CONNECTED_TOP = [
-  'plugin:telegram:telegram',
-  '❯ View tools',
-  '  Reconnect',
-  '  Disable',
+  '❯ /mcp',
+  '────────────────────────────────',
+  '  Telegram MCP Server',
+  '  Status:           ✔ connected',
+  '  Command:          bun run --cwd /path/telegram',
+  '  ❯ 1. View tools',
+  '    2. Reconnect',
+  '    3. Disable',
+  '  ↑/↓ to navigate · Enter to select · Esc to back',
 ].join('\n')
 const SUBMENU_CONNECTED_ON_RECONNECT = [
-  'plugin:telegram:telegram',
-  '  View tools',
-  '❯ Reconnect',
-  '  Disable',
+  '❯ /mcp',
+  '────────────────────────────────',
+  '  Telegram MCP Server',
+  '  Status:           ✔ connected',
+  '    1. View tools',
+  '  ❯ 2. Reconnect',
+  '    3. Disable',
+  '  ↑/↓ to navigate · Enter to select · Esc to back',
 ].join('\n')
 const SUBMENU_FAILED_TOP = [
-  'plugin:telegram:telegram',
-  '❯ Reconnect',
-  '  Disable',
+  '❯ /mcp',
+  '────────────────────────────────',
+  '  Telegram MCP Server',
+  '  Status:           ✘ failed',
+  '  Command:          bun run --cwd /path/telegram',
+  '  ❯ 1. Reconnect',
+  '    2. Disable',
+  '  ↑/↓ to navigate · Enter to select · Esc to back',
 ].join('\n')
 const SUBMENU_DISABLED_TOP = [
-  'plugin:telegram:telegram',
-  '❯ Enable',
+  '❯ /mcp',
+  '────────────────────────────────',
+  '  Telegram MCP Server',
+  '  Status:           ◯ disabled',
+  '  ❯ 1. Enable',
+  '  ↑/↓ to navigate · Enter to select · Esc to back',
 ].join('\n')
 
 describe('resolveAgentSession', () => {
@@ -105,13 +130,33 @@ describe('resolveAgentProviderType', () => {
 })
 
 describe('selectedSubmenuLine', () => {
-  it('returns the row marked with the cursor', () => {
-    expect(selectedSubmenuLine(SUBMENU_CONNECTED_TOP)).toBe('❯ View tools')
-    expect(selectedSubmenuLine(SUBMENU_FAILED_TOP)).toBe('❯ Reconnect')
+  it('returns the numbered row marked with the cursor', () => {
+    expect(selectedSubmenuLine(SUBMENU_CONNECTED_TOP)).toBe('  ❯ 1. View tools')
+    expect(selectedSubmenuLine(SUBMENU_FAILED_TOP)).toBe('  ❯ 1. Reconnect')
+    expect(selectedSubmenuLine(SUBMENU_CONNECTED_ON_RECONNECT)).toBe('  ❯ 2. Reconnect')
   })
 
   it('returns null when no cursor is present', () => {
     expect(selectedSubmenuLine('  View tools\n  Reconnect')).toBeNull()
+  })
+
+  // REGRESSION (2026-06-02 reconnect-loop, CC 2.1.160): the `❯ /mcp` input
+  // echo at the top of the pane must NOT be mistaken for the menu cursor. A
+  // bare `/❯/` returned that line every time, so target.test() never matched
+  // the action row and we logged "could not place cursor on target option".
+  it('ignores the "❯ /mcp" input-echo line and returns the numbered menu row', () => {
+    const pane = [
+      '❯ /mcp',
+      '  Telegram MCP Server',
+      '  Status:           ✘ failed',
+      '  ❯ 1. Reconnect',
+      '    2. Disable',
+    ].join('\n')
+    expect(selectedSubmenuLine(pane)).toBe('  ❯ 1. Reconnect')
+  })
+
+  it('returns null when only the input echo carries a cursor (no numbered row)', () => {
+    expect(selectedSubmenuLine('❯ /mcp\n  Telegram MCP Server')).toBeNull()
   })
 })
 
@@ -164,6 +209,19 @@ describe('chooseSubmenuTarget', () => {
       '❯ 1. Reconnect',
     ].join('\n')
     expect(chooseSubmenuTarget(failedPane)?.source).toBe('reconnect')
+  })
+
+  it('detects the CC 2.1.160 failed glyph ✘ (U+2718) via the status header, not a label fallback', () => {
+    // The pane carries NO "reconnect" label text, so the only path that can
+    // return RECONNECT_RX is the Status header. This isolates the glyph match:
+    // with the old `[✗x×]` class the ✘ (U+2718) would miss and this returns
+    // null (2026-06-02 glyph drift).
+    const pane = [
+      '  Telegram MCP Server',
+      '  Status:           ✘ failed',
+      '  ❯ 1. Restart',
+    ].join('\n')
+    expect(chooseSubmenuTarget(pane)?.source).toBe('reconnect')
   })
 
   it('handles the ◯/○ glyph variants Claude Code has shipped', () => {
@@ -287,15 +345,18 @@ describe('attemptChannelMcpReconnect', () => {
     mockCapturePane
       .mockReturnValueOnce('/mcp')
       .mockReturnValueOnce('plugin:slack-channel:marveen-marketplace found')
-      .mockReturnValueOnce('plugin:slack-channel:marveen-marketplace\n❯ Reconnect\n  Disable')
+      .mockReturnValueOnce('plugin:slack-channel:marveen-marketplace\n  Status:           ✘ failed\n  ❯ 1. Reconnect\n    2. Disable')
 
     attemptChannelMcpReconnect('slacker')
 
-    expect(mockExecFileSync).toHaveBeenCalledWith(
-      '/usr/local/bin/tmux',
-      ['send-keys', '-t', 'agent-slacker', 'Escape'],
-      expect.any(Object),
+    // Intent: sub-agent session routing -> the keystrokes target the
+    // `agent-slacker` tmux session. Assert on the args, not the absolute tmux
+    // path (resolveFromPath returns the real binary location, which varies by
+    // host -- /usr/bin/tmux here, /usr/local/bin/tmux elsewhere).
+    const slackerSendKeys = mockExecFileSync.mock.calls.filter(
+      (c) => Array.isArray(c[1]) && c[1][0] === 'send-keys' && c[1][2] === 'agent-slacker',
     )
+    expect(slackerSendKeys.length).toBeGreaterThan(0)
   })
 
   it('sends Escape on error to clean up menu state', () => {

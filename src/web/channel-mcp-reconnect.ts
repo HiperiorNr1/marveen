@@ -52,16 +52,25 @@ const ENABLE_RX = /\benable\b/i
 //   ◯ disabled  -> Enable
 // The ◯ vs ○ ambiguity is real (Claude Code has shipped both); match either.
 const DISABLED_STATUS_RX = /Status:\s*[◯○]\s*disabled/i
-const FAILED_STATUS_RX = /Status:\s*[✗x×]\s*failed/i
-// Claude Code's TUI marks the selected list row with a `❯` cursor (same glyph
-// the input prompt uses -- see pane-state.ts). capture-pane -p strips colour,
-// so this textual marker is our only selection signal.
-const POINTER_RX = /❯/
+// The failed glyph drifted across Claude Code versions: pre-2.1 shipped `✗`
+// (U+2717), 2.1.160 renders `✘` (U+2718, hexdump-confirmed 2026-06-02). Match
+// both (plus the ASCII fallbacks) so a glyph bump can't silently un-detect the
+// failed state and drop us onto the footer fallback.
+const FAILED_STATUS_RX = /Status:\s*[✗✘xX×]\s*failed/i
+// Claude Code's TUI marks the selected SUBMENU row with a `❯` cursor on a
+// NUMBERED action row (`❯ 1. Reconnect`). A bare `/❯/` is NOT safe: in CC
+// 2.1.160 the `/mcp` slash command stays echoed in the input line at the top
+// of the captured pane as `❯ /mcp`, so the first `❯` line is the input echo,
+// not the menu cursor. Matching only the numbered-row form keeps the input
+// echo from shadowing the selection (2026-06-02 reconnect-loop: every step
+// returned `❯ /mcp`, target.test never matched -> "could not place cursor on
+// target option").
+const SUBMENU_CURSOR_RX = /❯\s+\d+\.\s/
 
-/** The submenu row currently marked with the `❯` cursor, or null. */
+/** The numbered submenu row currently marked with the `❯` cursor, or null. */
 export function selectedSubmenuLine(pane: string): string | null {
   for (const raw of pane.split('\n')) {
-    if (POINTER_RX.test(raw)) return raw
+    if (SUBMENU_CURSOR_RX.test(raw)) return raw
   }
   return null
 }

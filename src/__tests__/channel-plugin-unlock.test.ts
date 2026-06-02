@@ -23,25 +23,26 @@ describe('channel-plugin-unlock helper contract', () => {
     expect(helper).toMatch(/export\s+function\s+schedulePluginUnlockAfterRespawn\b/)
   })
 
-  it('gates the keystrokes on the absence of a bun child under the claude pid', () => {
-    // The bun-child probe is the single most important safety check: if a
-    // bun poller is alive, the plugin is running and Up+Enter+Enter would
-    // navigate to "Disable", killing a healthy channel.
-    expect(helper).toMatch(/pgrep/)
-    expect(helper).toMatch(/hasBunChild/)
-    // The unlock keystrokes path must be reachable ONLY when hasBunChild is
-    // false - assert by checking the early-return branch precedes the
-    // keystroke call inside runUnlockProbe.
+  it("gates the keystrokes on the absence of THIS provider's poller under the claude pid", () => {
+    // Provider-specific liveness (Fix1, telegram-reconnect-loop-fix-2026-06-02):
+    // a bare `pgrep -P <pid> bun` counted a SECOND channel plugin's bun child
+    // (e.g. synology-chat) as "this plugin is healthy" and silently skipped
+    // the unlock for a dead telegram. The gate is now
+    // hasProviderPoller(claudePid, provider) -- a provider-scoped poller match.
+    expect(helper).toMatch(/hasProviderPoller/)
+    // The unlock keystrokes path must be reachable ONLY when the provider
+    // poller is ABSENT - assert the early-return branch precedes the keystroke
+    // call inside runUnlockProbe.
     const probeStart = helper.indexOf('function runUnlockProbe')
     expect(probeStart, 'runUnlockProbe not found').toBeGreaterThan(0)
     const probeEnd = helper.indexOf('\n}\n', probeStart)
     const probeBody = helper.slice(probeStart, probeEnd > probeStart ? probeEnd : undefined)
-    const bunIdx = probeBody.indexOf('hasBunChild(')
+    const pollerIdx = probeBody.indexOf('hasProviderPoller(')
     const sendIdx = probeBody.indexOf('sendUnlockKeystrokes(')
-    expect(bunIdx).toBeGreaterThan(0)
-    expect(sendIdx).toBeGreaterThan(bunIdx)
-    // Ensure the hasBunChild branch returns before sendUnlockKeystrokes.
-    const between = probeBody.slice(bunIdx, sendIdx)
+    expect(pollerIdx).toBeGreaterThan(0)
+    expect(sendIdx).toBeGreaterThan(pollerIdx)
+    // Ensure the hasProviderPoller branch returns before sendUnlockKeystrokes.
+    const between = probeBody.slice(pollerIdx, sendIdx)
     expect(between).toMatch(/return\b/)
   })
 
