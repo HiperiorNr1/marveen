@@ -96,7 +96,7 @@ export interface ReapResult {
  */
 export function reapChannelOrphans(
   provider: ChannelProviderType,
-  agentDirPath: string,
+  agentDirPath?: string,
 ): ReapResult {
   const chanDir = channelStateDir(provider, agentDirPath)
   const envVar = STATE_ENV_VAR[provider]

@@ -105,11 +105,25 @@ $TMUX kill-session -t "$SESSION" 2>/dev/null
 # poller env contains *_STATE_DIR=<this main agent's channel dir>; argv does
 # not, so `pkill -f` against the env var never matches. We grep `ps eww -e`
 # instead, which surfaces each process environment on macOS BSD ps.
-MAIN_CHAN_DIR="$INSTALL_DIR/.claude/channels/$CHANNEL_PROVIDER"
+# Main-agent channel pollers run at the Claude Code DEFAULT state-dir
+# ($HOME/.claude/channels/<provider>), NOT under $INSTALL_DIR -- the previous
+# value made every env-var reap a no-op for the main agent
+# (telegram-reconnect-loop-fix-2026-06-02 Fix2). Sub-agents continue to use
+# <agent-dir>/.claude/channels/<provider> via channel-poller-reap.ts.
+MAIN_CHAN_DIR="$HOME/.claude/channels/$CHANNEL_PROVIDER"
 case "$CHANNEL_PROVIDER" in
   slack)    STATE_ENV_VAR="SLACK_STATE_DIR" ;;
   discord)  STATE_ENV_VAR="DISCORD_STATE_DIR" ;;
   *)        STATE_ENV_VAR="TELEGRAM_STATE_DIR" ;;
+esac
+# Explicit-export the state-dir BEFORE the claude spawn below, so the channel
+# poller (a grandchild of claude) inherits a labelled env-var. Without this,
+# the main-agent poller has no <PROVIDER>_STATE_DIR env at all, and a later
+# `ps eww` reap can never match it (telegram-reconnect-loop-fix-2026-06-02 Fix2).
+case "$CHANNEL_PROVIDER" in
+  telegram) export TELEGRAM_STATE_DIR="$MAIN_CHAN_DIR" ;;
+  discord)  export DISCORD_STATE_DIR="$MAIN_CHAN_DIR" ;;
+  slack)    export SLACK_STATE_DIR="$MAIN_CHAN_DIR" ;;
 esac
 ORPHAN_PIDS="$(/bin/ps eww -e 2>/dev/null | awk -v needle="${STATE_ENV_VAR}=${MAIN_CHAN_DIR}" '$0 ~ needle { print $1 }')"
 if [ -n "$ORPHAN_PIDS" ]; then

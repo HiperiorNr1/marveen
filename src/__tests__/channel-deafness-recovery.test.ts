@@ -11,12 +11,36 @@ import {
 // it the respawned bun telegram bridge can't be located and the session comes
 // up channel-less. Lock it so a future refactor can't silently drop it.
 describe('buildMainSessionRespawnCmd', () => {
-  const base = { claudePath: '/usr/local/bin/claude', pluginId: 'telegram@claude-plugins-official', model: "claude-opus-4-8[1m]" }
+  const base = {
+    claudePath: '/usr/local/bin/claude',
+    pluginId: 'telegram@claude-plugins-official',
+    provider: 'telegram' as const,
+    model: "claude-opus-4-8[1m]",
+  }
 
   it('always exports a PATH that includes $HOME/.bun/bin', () => {
     const cmd = buildMainSessionRespawnCmd({ ...base, continueSession: false })
     expect(cmd).toContain('$HOME/.bun/bin')
     expect(cmd).toMatch(/^export PATH=/)
+  })
+
+  // CONTRACT: the respawn command MUST carry an explicit <PROVIDER>_STATE_DIR
+  // export so the channel-poller-reap.ts `ps eww` env-scan can find this
+  // process at recovery time. Without it the main-agent poller is invisible
+  // to the reap and orphans 409-loop the next respawn
+  // (telegram-reconnect-loop-fix-2026-06-02 Fix2). HOME-based path checked
+  // by suffix (literal $HOME survives at command-build time; the shell that
+  // runs the command expands it at respawn).
+  it('exports <PROVIDER>_STATE_DIR pointing at $HOME/.claude/channels/<provider>', () => {
+    const cmd = buildMainSessionRespawnCmd({ ...base, continueSession: false })
+    expect(cmd).toContain('export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram"')
+    const slackCmd = buildMainSessionRespawnCmd({
+      ...base,
+      provider: 'slack',
+      pluginId: 'slack-channel@marveen-marketplace',
+      continueSession: false,
+    })
+    expect(slackCmd).toContain('export SLACK_STATE_DIR="$HOME/.claude/channels/slack"')
   })
 
   it('includes the channels plugin and skip-permissions flag', () => {

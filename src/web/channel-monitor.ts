@@ -261,11 +261,24 @@ function readConfiguredMainModel(): string {
 export function buildMainSessionRespawnCmd(opts: {
   claudePath: string
   pluginId: string
+  provider: ChannelProviderType
   model: string
   continueSession: boolean
 }): string {
+  // Provider state-dir env: the main-agent poller defaults to
+  // $HOME/.claude/channels/<provider> but Claude Code does NOT inherit any
+  // <PROVIDER>_STATE_DIR env for the spawned poller -- so a later
+  // `ps eww` reap (channel-poller-reap.ts) can never find it. Explicit-export
+  // it here, mirroring scripts/channels.sh
+  // (telegram-reconnect-loop-fix-2026-06-02 Fix2).
+  const stateEnvVar =
+    opts.provider === 'slack' ? 'SLACK_STATE_DIR'
+    : opts.provider === 'discord' ? 'DISCORD_STATE_DIR'
+    : 'TELEGRAM_STATE_DIR'
+  const stateSubdir = opts.provider === 'slack' ? 'slack' : opts.provider === 'discord' ? 'discord' : 'telegram'
   return [
     'export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
+    `&& export ${stateEnvVar}="$HOME/.claude/channels/${stateSubdir}"`,
     '&&', opts.claudePath,
     ...(opts.continueSession ? ['--continue'] : []),
     '--dangerously-skip-permissions',
@@ -284,8 +297,13 @@ function resumeMarveenSession(): boolean {
     // see channel-poller-reap.ts. Without this, the freshly-respawned
     // --continue session would race a still-alive poller for the same bot
     // token (409 Conflict on getUpdates).
+    //
+    // Use channelStateDir(provider) (HOME-default, $HOME/.claude/channels/
+    // <provider>) -- the main-agent poller lives at the Claude Code default
+    // location, NOT under PROJECT_ROOT. PROJECT_ROOT here was a no-op for the
+    // main agent (telegram-reconnect-loop-fix-2026-06-02 Fix2).
     try {
-      reapChannelOrphans(provider.type, PROJECT_ROOT)
+      reapChannelOrphans(provider.type)
     } catch (err) {
       logger.warn({ err }, 'resumeMarveenSession: pre-respawn reap failed (continuing)')
     }
@@ -293,6 +311,7 @@ function resumeMarveenSession(): boolean {
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: CLAUDE,
       pluginId: provider.pluginId,
+      provider: provider.type,
       model: readConfiguredMainModel(),
       continueSession: true,
     })
@@ -403,9 +422,22 @@ function writeRespawnStamp(): void {
 function respawnMarveenSessionFresh(): boolean {
   const provider = getProvider(getMainAgentProvider())
   try {
+    // Reap any orphan main-agent poller BEFORE respawn-pane -- mirrors
+    // resumeMarveenSession (line ~292). Without this, the fresh session's
+    // new poller races a stale one for the same bot token (409 Conflict on
+    // getUpdates) and the recovery cascade stays wedged. The fresh-respawn
+    // path used to skip this step entirely
+    // (telegram-reconnect-loop-fix-2026-06-02 Fix2).
+    try {
+      reapChannelOrphans(provider.type)
+    } catch (err) {
+      logger.warn({ err }, 'respawnMarveenSessionFresh: pre-respawn reap failed (continuing)')
+    }
+
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: CLAUDE,
       pluginId: provider.pluginId,
+      provider: provider.type,
       model: readConfiguredMainModel(),
       continueSession: false,
     })
