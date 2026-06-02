@@ -200,6 +200,12 @@ interface MarveenDownState {
   // Set once we've issued the diagnostic getUpdates probe for this down-cycle,
   // so we don't spam the upstream API every poll while recovery is running.
   conflictProbed?: boolean
+  // Set once we've alerted the operator THIS down-episode that the /mcp
+  // navigator itself is broken (CC version drift). Per-episode dedup so a
+  // broken navigator isn't masked by a lucky poller self-heal, but also
+  // doesn't pile alerts on the existing stage-alert path
+  // (telegram-reconnect-loop-fix-2026-06-02 §9 visibility requirement).
+  navigatorBrokenAlerted?: boolean
 }
 
 const SAVE_WINDOW_MS = 60_000
@@ -211,8 +217,29 @@ function getMainAgentProvider(): ChannelProviderType {
   return CHANNEL_PROVIDER
 }
 
-function softReconnectMarveen(): boolean {
-  return attemptChannelMcpReconnect(MAIN_AGENT_ID).ok
+function softReconnectMarveen(): ReturnType<typeof attemptChannelMcpReconnect> {
+  return attemptChannelMcpReconnect(MAIN_AGENT_ID)
+}
+
+// Operator alert emitted at most ONCE per down-episode when the /mcp navigator
+// itself could not be driven (nav_list / nav_submenu / capture) -- i.e. the
+// recovery mechanism is broken, not just temporarily ineffective. Without this
+// the channel can self-heal via the bun poller while the soft-reconnect path
+// stays silently broken, hiding a CC-version-drift regression
+// (telegram-reconnect-loop-fix-2026-06-02 §9, EFiveen review point C: route
+// through the existing dedup'd alert path; clears on handleMarveenUp).
+function maybeAlertBrokenNavigator(
+  reason: ReturnType<typeof attemptChannelMcpReconnect>['reason'],
+): void {
+  if (!marveenDownState) return
+  if (marveenDownState.navigatorBrokenAlerted) return
+  if (reason !== 'nav_list' && reason !== 'nav_submenu' && reason !== 'capture') return
+  marveenDownState.navigatorBrokenAlerted = true
+  marveenDownState.lastAlertAt = Date.now()
+  sendAlert(
+    '⚠️ Az automatikus /mcp reconnect nem tudta vezerelni a menut (lehet CC-verzio drift). ' +
+    'Lehet kezi /mcp reconnect kell. Reason: ' + reason,
+  )
 }
 
 function triggerMarveenMemorySave(): void {
@@ -700,14 +727,20 @@ function handleMarveenDown(): void {
           })
       }
     }
-    if (softReconnectMarveen()) marveenDownState.softAttempts += 1
+    const firstAttempt = softReconnectMarveen()
+    if (firstAttempt.ok) marveenDownState.softAttempts += 1
+    else maybeAlertBrokenNavigator(firstAttempt.reason)
     return
   }
   if (marveenDownState.stage === 'soft') {
-    if (marveenDownState.softAttempts < 3 && softReconnectMarveen()) {
-      marveenDownState.softAttempts += 1
-      marveenDownState.lastAlertAt = now
-      return
+    if (marveenDownState.softAttempts < 3) {
+      const retry = softReconnectMarveen()
+      if (retry.ok) {
+        marveenDownState.softAttempts += 1
+        marveenDownState.lastAlertAt = now
+        return
+      }
+      maybeAlertBrokenNavigator(retry.reason)
     }
     marveenDownState.stage = 'save'
     marveenDownState.stageStartedAt = now

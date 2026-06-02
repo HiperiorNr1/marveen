@@ -10,9 +10,23 @@ import { getProvider, type ChannelProviderType } from '../channel-provider.js'
 const TMUX = resolveFromPath('tmux')
 const MAX_UP_ATTEMPTS = 8
 
+// `reason` lets the caller (channel-monitor) distinguish a NAVIGATOR failure
+// (`nav_list`/`nav_submenu`/`capture` -- the /mcp menu could not be driven, i.e.
+// the recovery mechanism itself is broken) from "drove fine but the plugin
+// offered no safe action" (`no_action`). The monitor surfaces the former as a
+// visible operator alert so a broken navigator is never masked by a lucky
+// poller self-heal.
+export type ReconnectFailReason =
+  | 'nav_list'
+  | 'nav_submenu'
+  | 'no_action'
+  | 'capture'
+  | 'error'
+
 export interface ReconnectResult {
   ok: boolean
   message: string
+  reason?: ReconnectFailReason
 }
 
 export function resolveAgentSession(agentName: string): string {
@@ -75,6 +89,29 @@ export function selectedSubmenuLine(pane: string): string | null {
   return null
 }
 
+// Max Down presses we'll spend walking the /mcp SERVER LIST cursor onto the
+// target plugin row. Down wraps around the list, so this is a safety bound,
+// not a traversal limit -- the live list is ~7 servers; 16 covers a long list
+// with margin.
+const LIST_MAX_STEPS = 16
+// In the /mcp SERVER LIST, the cursor `❯` marks a server row, and every server
+// row carries an inline status separated by a mid-dot ` · ` -- e.g.
+// `❯ plugin:telegram:telegram · ✔ connected · 31 tools`, or in the recovery
+// states we actually act on, `· ✘ failed` / `· ◯ disabled` (which carry NO
+// `N tools` suffix). The `❯ /mcp` input echo and the section headers
+// (`User MCPs (...)`, `Built-in MCPs (always available)`, the bare `claude.ai`
+// group line) carry no ` · `, so requiring the mid-dot picks the real cursor
+// row and is immune to the input-echo shadow (CC 2.1.160).
+const LIST_MIDDOT = ' · '
+
+/** The /mcp server-list row currently marked with the `❯` cursor, or null. */
+export function selectedListRow(pane: string): string | null {
+  for (const raw of pane.split('\n')) {
+    if (raw.includes('❯') && raw.includes(LIST_MIDDOT)) return raw
+  }
+  return null
+}
+
 /**
  * Pick which action to drive in the plugin submenu based on what the pane
  * offers. Authoritative source is the `Status: <glyph> <word>` header that
@@ -105,118 +142,159 @@ export function chooseSubmenuTarget(pane: string): RegExp | null {
   return null
 }
 
+function send(session: string, ...keys: string[]): void {
+  execFileSync(TMUX, ['send-keys', '-t', session, ...keys], { timeout: 3000 })
+}
+
+function settle(seconds: string, timeoutMs: number): void {
+  execFileSync('/bin/sleep', [seconds], { timeout: timeoutMs })
+}
+
+function safeEscape(session: string): void {
+  try { send(session, 'Escape') } catch { /* best effort */ }
+}
+
 /**
- * Attempt to reconnect a channel MCP plugin by navigating the /mcp
- * menu in the agent's tmux session. Generalises the existing
- * softReconnectMarveen() logic to any agent.
+ * Drive the /mcp menu deterministically: read the SERVER LIST, step the
+ * cursor onto the row whose text matches `pluginPattern` (case-insensitive),
+ * then enter and activate the safe action (Reconnect / Enable, status-first
+ * per chooseSubmenuTarget). Replaces the previous blind Up-walk finder
+ * (telegram-reconnect-loop-fix-2026-06-02 §9): with multiple MCP servers in
+ * the list and two channel plugins enabled, the blind algorithm could not
+ * reliably land on telegram and logged "plugin submenu not found".
  *
- * Sequence: Escape → /mcp Enter → Up×N until plugin found → Enter →
- * step the `❯` cursor onto "Reconnect" (or "Enable" when disabled),
- * verifying after each step → Enter → Escape.
+ * Down-stepping wraps the list cursor, so the start position does not
+ * matter; LIST_MAX_STEPS is a safety bound. The submenu stage reuses the
+ * existing chooseSubmenuTarget / SUBMENU_CURSOR_RX logic from §8 (CC 2.1.160
+ * numbered-row + ✘ glyph).
  *
- * The submenu option order is STATE-DEPENDENT in Claude Code 2.1.x:
- *   connected: 1.View tools  2.Reconnect  3.Disable
- *   failed:    1.Reconnect   ...
- *   disabled:  1.Enable
- * The previous logic blindly pressed Down+Enter, assuming "Reconnect" was
- * always one row down -- true only while connected. In the failed state that
- * landed on "Disable" and DISABLED the plugin, which then offered only
- * "Enable" and broke every subsequent retry ("submenu not found"). We now
- * read the menu and only press Enter once the cursor is confirmed on a safe
- * target.
+ * Returns a structured `reason` on failure so the monitor can distinguish a
+ * broken navigator (nav_list / nav_submenu / capture -- the menu could not be
+ * driven, i.e. the recovery mechanism itself is broken) from "drove fine but
+ * the plugin offered no safe action" (no_action). The monitor surfaces the
+ * former as a visible operator alert (channel-monitor handleMarveenDown) so
+ * a broken navigator is never masked by a lucky poller self-heal.
  */
-export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
-  const session = resolveAgentSession(agentName)
-  const providerType = resolveAgentProviderType(agentName)
-  const pluginPattern = getPluginPattern(providerType)
-
+export function driveMcpPluginAction(
+  session: string,
+  pluginPattern: RegExp,
+): ReconnectResult {
   try {
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
-    execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
+    // Dismiss any modal/input residue, then open /mcp.
+    send(session, 'Escape'); settle('1', 2000)
+    send(session, '/mcp', 'Enter'); settle('1', 3000)
 
-    execFileSync(TMUX, ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 3000 })
-    execFileSync('/bin/sleep', ['1'], { timeout: 3000 })
-
-    const pane1 = capturePane(session)
-    if (!pane1) {
-      logger.warn({ agentName, session }, 'channel-mcp-reconnect: capture failed after /mcp')
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
-      return { ok: false, message: 'Failed to capture pane after /mcp' }
+    const listPane = capturePane(session)
+    if (!listPane) {
+      safeEscape(session)
+      return { ok: false, reason: 'capture', message: 'Failed to capture pane after /mcp' }
     }
 
-    let matchedAt = -1
-    for (let upCount = 1; upCount <= MAX_UP_ATTEMPTS; upCount++) {
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Up'], { timeout: 3000 })
-      execFileSync('/bin/sleep', ['0.2'], { timeout: 1000 })
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
-      execFileSync('/bin/sleep', ['1'], { timeout: 3000 })
-
-      const pane = capturePane(session)
-      if (pane && pluginPattern.test(pane)) {
-        matchedAt = upCount
+    // List-driven step-and-verify: walk the cursor onto the target server
+    // row by re-reading the LIST cursor after each Down. The list cursor
+    // marks a server row (selectedListRow requires the ` · ` separator),
+    // immune to the `❯ /mcp` input-echo shadow and the section-header lines
+    // (`User MCPs (...)`, `Built-in MCPs (always available)`, the bare
+    // `claude.ai` group). Down wraps the list, so a sufficiently large step
+    // budget always finds a present row regardless of start position.
+    let listPaneState = listPane
+    let landedRow: string | null = null
+    for (let step = 0; step <= LIST_MAX_STEPS; step++) {
+      const sel = selectedListRow(listPaneState)
+      if (sel && pluginPattern.test(sel)) {
+        landedRow = sel
         break
       }
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
-      execFileSync('/bin/sleep', ['0.5'], { timeout: 1000 })
+      send(session, 'Down'); settle('0.25', 1000)
+      listPaneState = capturePane(session) ?? listPaneState
     }
 
-    if (matchedAt < 0) {
+    if (!landedRow) {
       logger.warn(
-        { agentName, session, maxUpAttempts: MAX_UP_ATTEMPTS, pluginPattern: pluginPattern.source },
-        'channel-mcp-reconnect: plugin submenu not found',
+        { session, pluginPattern: pluginPattern.source, maxSteps: LIST_MAX_STEPS },
+        'channel-mcp-reconnect: plugin row not found in /mcp list',
       )
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
-      return { ok: false, message: `Plugin not found within ${MAX_UP_ATTEMPTS} Up attempts` }
+      safeEscape(session); settle('0.5', 1000); safeEscape(session)
+      return {
+        ok: false,
+        reason: 'nav_list',
+        message: `Plugin row ${pluginPattern.source} not found within ${LIST_MAX_STEPS} Down steps`,
+      }
     }
 
-    // Inside the plugin submenu now. Drive the cursor onto a safe action
-    // ("Reconnect", or "Enable" when disabled) and only press Enter once it
-    // is confirmed there -- never blindly, which previously hit "Disable".
+    // Open the submenu for the located plugin row.
+    send(session, 'Enter'); settle('1', 3000)
+
     let submenu = capturePane(session)
     if (!submenu) {
-      logger.warn({ agentName, session }, 'channel-mcp-reconnect: capture failed in submenu')
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
-      return { ok: false, message: 'Failed to capture submenu pane' }
+      safeEscape(session); settle('0.5', 1000); safeEscape(session)
+      return { ok: false, reason: 'capture', message: 'Failed to capture submenu pane' }
     }
 
     const target = chooseSubmenuTarget(submenu)
     if (!target) {
-      logger.warn({ agentName, session }, 'channel-mcp-reconnect: no Reconnect/Enable option in submenu')
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
-      return { ok: false, message: 'No Reconnect/Enable option in submenu' }
+      logger.warn({ session }, 'channel-mcp-reconnect: no Reconnect/Enable option in submenu')
+      safeEscape(session); settle('0.5', 1000); safeEscape(session)
+      return { ok: false, reason: 'no_action', message: 'No Reconnect/Enable option in submenu' }
     }
 
     let onTarget = false
     for (let step = 0; step <= SUBMENU_MAX_STEPS; step++) {
       const sel = selectedSubmenuLine(submenu)
-      if (sel && target.test(sel)) {
-        onTarget = true
-        break
-      }
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Down'], { timeout: 3000 })
-      execFileSync('/bin/sleep', ['0.3'], { timeout: 1000 })
-      submenu = capturePane(session) ?? ''
+      if (sel && target.test(sel)) { onTarget = true; break }
+      send(session, 'Down'); settle('0.3', 1000)
+      submenu = capturePane(session) ?? submenu
     }
 
     if (!onTarget) {
       logger.warn(
-        { agentName, session, target: target.source, maxSteps: SUBMENU_MAX_STEPS },
+        { session, target: target.source, maxSteps: SUBMENU_MAX_STEPS },
         'channel-mcp-reconnect: could not place cursor on target option',
       )
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
-      return { ok: false, message: `Could not select ${target.source} within ${SUBMENU_MAX_STEPS} steps` }
+      safeEscape(session); settle('0.5', 1000); safeEscape(session)
+      return {
+        ok: false,
+        reason: 'nav_submenu',
+        message: `Could not select ${target.source} within ${SUBMENU_MAX_STEPS} steps`,
+      }
     }
 
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
-    execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+    // Activate, then back the pane out to idle (two Escapes: action menu ->
+    // server list -> prompt). Without the second Escape detectPaneState stays
+    // non-idle and inter-agent / scheduled traffic piles up (2026-06-01 19:25
+    // incident, mirror of the unlock.ts comment).
+    send(session, 'Enter'); settle('2', 4000)
+    safeEscape(session); settle('0.5', 1000); safeEscape(session)
 
     const action = target === RECONNECT_RX ? 'Reconnect' : 'Enable'
-    logger.info({ agentName, session, matchedAt, action, provider: providerType }, 'channel-mcp-reconnect: completed')
-    return { ok: true, message: `Activated ${action} via /mcp (Up x${matchedAt})` }
+    logger.info(
+      { session, action, row: landedRow.trim() },
+      'channel-mcp-reconnect: completed',
+    )
+    return { ok: true, message: `Activated ${action} via /mcp` }
   } catch (err) {
-    logger.warn({ err, agentName, session }, 'channel-mcp-reconnect failed')
-    try { execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 }) } catch { /* best effort */ }
-    return { ok: false, message: err instanceof Error ? err.message : String(err) }
+    logger.warn({ err, session }, 'channel-mcp-reconnect failed')
+    safeEscape(session)
+    return {
+      ok: false,
+      reason: 'error',
+      message: err instanceof Error ? err.message : String(err),
+    }
   }
+}
+
+/**
+ * Reconnect a channel MCP plugin in the named agent's tmux session by driving
+ * the /mcp menu. Thin wrapper around driveMcpPluginAction that resolves the
+ * agent's session, provider, and plugin pattern.
+ */
+export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
+  const session = resolveAgentSession(agentName)
+  const providerType = resolveAgentProviderType(agentName)
+  const pluginPattern = getPluginPattern(providerType)
+  const r = driveMcpPluginAction(session, pluginPattern)
+  if (r.ok) {
+    logger.info({ agentName, provider: providerType }, 'channel-mcp-reconnect: agent reconnect ok')
+  }
+  return r
 }

@@ -23,26 +23,27 @@ describe('channel-plugin-unlock helper contract', () => {
     expect(helper).toMatch(/export\s+function\s+schedulePluginUnlockAfterRespawn\b/)
   })
 
-  it("gates the keystrokes on the absence of THIS provider's poller under the claude pid", () => {
+  it("gates the action on the absence of THIS provider's poller under the claude pid", () => {
     // Provider-specific liveness (Fix1, telegram-reconnect-loop-fix-2026-06-02):
     // a bare `pgrep -P <pid> bun` counted a SECOND channel plugin's bun child
     // (e.g. synology-chat) as "this plugin is healthy" and silently skipped
     // the unlock for a dead telegram. The gate is now
     // hasProviderPoller(claudePid, provider) -- a provider-scoped poller match.
     expect(helper).toMatch(/hasProviderPoller/)
-    // The unlock keystrokes path must be reachable ONLY when the provider
-    // poller is ABSENT - assert the early-return branch precedes the keystroke
-    // call inside runUnlockProbe.
+    // The unlock action must be reachable ONLY when the provider poller is
+    // ABSENT - assert the early-return branch precedes the action call inside
+    // runUnlockProbe. The action delegates to the shared list-driven navigator
+    // (driveMcpPluginAction, §9), wrapped here in runUnlock().
     const probeStart = helper.indexOf('function runUnlockProbe')
     expect(probeStart, 'runUnlockProbe not found').toBeGreaterThan(0)
     const probeEnd = helper.indexOf('\n}\n', probeStart)
     const probeBody = helper.slice(probeStart, probeEnd > probeStart ? probeEnd : undefined)
     const pollerIdx = probeBody.indexOf('hasProviderPoller(')
-    const sendIdx = probeBody.indexOf('sendUnlockKeystrokes(')
+    const actionIdx = probeBody.indexOf('runUnlock(')
     expect(pollerIdx).toBeGreaterThan(0)
-    expect(sendIdx).toBeGreaterThan(pollerIdx)
-    // Ensure the hasProviderPoller branch returns before sendUnlockKeystrokes.
-    const between = probeBody.slice(pollerIdx, sendIdx)
+    expect(actionIdx).toBeGreaterThan(pollerIdx)
+    // Ensure the hasProviderPoller branch returns before runUnlock fires.
+    const between = probeBody.slice(pollerIdx, actionIdx)
     expect(between).toMatch(/return\b/)
   })
 
@@ -56,32 +57,18 @@ describe('channel-plugin-unlock helper contract', () => {
     expect(helper).toMatch(/bypass permissions on/)
   })
 
-  it('delivers /mcp, Up, Enter, Enter then Esc, Esc to back the pane out to idle', () => {
-    // Pinning the full 6-key sequence:
-    //   /mcp + Up + Enter + Enter   -> revive plugin (Enable / Reconnect)
-    //   Esc + Esc                   -> back out of menu so pane returns idle
-    // Both Escapes are required: one for the action menu, one for the
-    // server list. Without them, detectPaneState stays non-idle and every
-    // scheduled task + inter-agent msg piles up "session busy"
-    // (2026-06-01 19:25 incident -- 13 min of dropped traffic).
-    const sendStart = helper.indexOf('function sendUnlockKeystrokes')
-    expect(sendStart, 'sendUnlockKeystrokes not found').toBeGreaterThan(0)
-    const sendEnd = helper.indexOf('\n}\n', sendStart)
-    const sendBody = helper.slice(sendStart, sendEnd > sendStart ? sendEnd : undefined)
-    expect(sendBody).toMatch(/'\/mcp',\s*'Enter'/)
-    const upIdx = sendBody.indexOf("'Up'")
-    expect(upIdx, "'Up' keystroke missing").toBeGreaterThan(0)
-    const afterUp = sendBody.slice(upIdx)
-    // Exactly two Enters after Up.
-    const enterMatches = afterUp.match(/send-keys[^]*?'Enter'\]/g) ?? []
-    expect(enterMatches.length).toBe(2)
-    // Exactly two Escapes after the second Enter.
-    const escapeMatches = afterUp.match(/send-keys[^]*?'Escape'\]/g) ?? []
-    expect(escapeMatches.length).toBe(2)
-    // Order: both Escapes must come AFTER the last Enter.
-    const lastEnterIdx = afterUp.lastIndexOf("'Enter'")
-    const firstEscapeIdx = afterUp.indexOf("'Escape'")
-    expect(firstEscapeIdx).toBeGreaterThan(lastEnterIdx)
+  it('delegates the menu drive to the shared list-driven navigator (driveMcpPluginAction)', () => {
+    // §9 contract: the blind /mcp + Up + Enter + Enter sequence is REPLACED
+    // by a call to the shared list-driven navigator. The single-Up assumption
+    // was unsafe with two channel plugins enabled (could land on the wrong
+    // row). All keystroke choreography (Down-walk, status-first action pick,
+    // Enter to activate, Escape×2 to back out to idle) is centralized in
+    // driveMcpPluginAction. The unlock helper must import it and call it.
+    expect(helper).toMatch(/from\s+'\.\/channel-mcp-reconnect\.js'/)
+    expect(helper).toMatch(/driveMcpPluginAction/)
+    // And the now-removed blind helper must NOT come back in a future
+    // refactor: the dead per-keystroke unlock sequence was the §9 root.
+    expect(helper).not.toMatch(/function sendUnlockKeystrokes\b/)
   })
 
   it('schedules the probe with a cold-start delay >= 25 seconds', () => {

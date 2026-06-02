@@ -343,3 +343,140 @@ run, framed generically as "any channel plugin", no synology specifics).
 
 > Status: ground truth done, fix designed. Planning-first — **awaiting
 > EFiveen GO before writing code** (deliberately not coded yet).
+
+---
+
+## 9. List-driven navigator — plan (2026-06-02 ~17:30, Dev; EFiveen GO for PLAN, code-GO separate)
+
+### 9.0 Why (live result of the §8 acute fix)
+After deploying the §8 fix (commit 74b4e00, dashboard restarted 17:09): the
+`could not place cursor` error is GONE and the destructive hard-restart loop
+stopped. But a SECOND defect surfaced — the soft `/mcp` reconnect now fails at
+the plugin-FINDING stage with `channel-mcp-reconnect: plugin submenu not found`
+(dashboard.log 17:13:03). The channel currently recovers only because the bun
+poller self-heals (e.g. 17:13:46 "recovered" with NO stage-2/3/4 escalation),
+which is fragile: if the poller does not self-heal next time, the broken finder
+escalates to a (now non-looping but still disruptive) hard restart.
+
+Ground truth (isolated synology-chat plugin scratch, telegram token untouched):
+- The plugin renders in the LIST with its FULL id:
+  `plugin:synology-chat:synology-chat · ✔ connected · 6 tools`. So telegram is
+  `plugin:telegram:telegram` in the list row.
+- The SUBMENU header capitalises the first letter:
+  `Plugin:synology-chat:synology-chat MCP Server` — the finder's `pluginPattern`
+  is case-INSENSITIVE so the match still works. So the failure is NOT a
+  match-text gap; it is a NAVIGATION gap.
+- The live list is ~7 servers: `User MCPs` (obsidian-memory, claude.ai Gmail /
+  Calendar / Drive / Notion) then `Built-in MCPs (always available)` (the
+  telegram + synology-chat plugins). The current finder's blind algorithm —
+  press Up, Enter, check the submenu, Escape, repeat up to 8× — does not
+  reliably land on telegram among that many rows with TWO plugins present.
+
+This is the SAME root as the `channel-plugin-unlock.ts` single-`Up` follow-up
+(§8.3 NEXT-ROUND note): blind Up-stepping is not multi-plugin-safe.
+
+### 9.1 Goal
+Replace blind Up-walking with a LIST-DRIVEN navigator shared by both menu
+drivers, multi-plugin-safe, with explicit visibility when it fails.
+
+### 9.2 Design
+
+**(1) Shared list-driven navigator** — new exported function in
+`channel-mcp-reconnect.ts` (cycle-safe: `channel-plugin-unlock.ts` may import
+from `channel-mcp-reconnect.ts`; the reverse import does not exist):
+
+```
+navigateToPluginAction(session, pluginPattern): ReconnectResult
+  1. open /mcp, settle, capture the LIST pane
+  2. step-and-verify on the LIST (NOT entering submenus):
+       loop up to LIST_MAX_STEPS (= list length + margin, e.g. 16):
+         sel = selectedListRow(pane)   // the ❯ row that is a server row
+         if sel && pluginPattern.test(sel): break (found)
+         send Down; settle; recapture
+       if not found -> return { ok:false, reason:'nav_list', message:... }
+  3. Enter -> submenu
+  4. target = chooseSubmenuTarget(submenu)   // unchanged (✔/✘/◯ status-first)
+       if !target -> return { ok:false, reason:'no_action' }
+  5. step the numbered submenu cursor onto target (existing SUBMENU_CURSOR_RX
+     logic) -> Enter to activate
+       if cursor never lands -> return { ok:false, reason:'nav_submenu' }
+  6. Esc, Esc -> back the pane out to idle
+       return { ok:true, action }
+```
+
+`selectedListRow(pane)`: the LIST cursor marks a SERVER row, which always
+contains ` · ` (mid-dot + status glyph). The `❯ /mcp` input echo and the
+section headers (`User MCPs (...)`, `Built-in MCPs (always available)`, the
+bare `claude.ai` group line) have no ` · `, so a matcher like
+`line.includes('❯') && line.includes(' · ')` selects the real cursor row and
+is immune to the input-echo shadow. (Distinct from the SUBMENU cursor matcher
+`SUBMENU_CURSOR_RX = /❯\s+\d+\.\s/` from §8 — the list rows are not numbered.)
+
+Down-stepping wraps around the list, so the target is reachable regardless of
+the start cursor position; the cap is a safety bound, not a traversal limit.
+
+**(2) Subsume the unlock single-Up problem.** `channel-plugin-unlock.ts`
+`sendUnlockKeystrokes` (blind `/mcp + Up + Enter + Enter`) is replaced by a
+call to `navigateToPluginAction(session, pluginPattern)`. The unlock probe
+keeps BOTH its existing gates: provider-poller-absence (`hasProviderPoller`)
+and idle-pane (`isSessionReadyForUnlock`). Result: the cold-start/in-process
+unlock path becomes status-aware (never presses Disable on a healthy plugin)
+AND multi-plugin-safe (lands on the right plugin even with synology-chat
+present) — closing the §8.3 NEXT-ROUND note in the same change.
+
+**(3) The §8 acute fix stays** — `SUBMENU_CURSOR_RX` and the `✘` glyph in
+`FAILED_STATUS_RX` are reused by the submenu stage of the shared navigator.
+
+**(4) Visibility / no silent self-heal reliance (EFiveen point 5).**
+`attemptChannelMcpReconnect`/`navigateToPluginAction` returns a structured
+`reason` on failure (`nav_list` | `nav_submenu` | `no_action` | `capture`).
+In `channel-monitor.ts handleMarveenDown`, when a soft attempt fails with a
+NAVIGATOR reason (`nav_list`/`nav_submenu` — the menu could not be driven, i.e.
+the recovery mechanism itself is broken, distinct from "ran but plugin still
+down"), emit a ONE-TIME, dedup'd operator alert per down-episode:
+> ⚠️ Az automatikus /mcp reconnect nem tudta vezerelni a menut (lehet CC-verzio
+> drift). Lehet kezi /mcp reconnect kell.
+So a broken navigator is never masked by a lucky self-heal. (Optional
+hardening, not required for this change: a circuit-breaker that, after K hard
+restarts within a rolling window, stops restarting and alerts instead of
+relying on the per-episode `gave_up` terminator.)
+
+### 9.3 Tests (loud regression)
+- New fixture: the REAL ~7-server 2.1.160 LIST (with `❯ /mcp` echo, `User MCPs`
+  / `Built-in MCPs` headers, the bare `claude.ai` group line, obsidian +
+  4 claude.ai connectors + `plugin:telegram:telegram` + `plugin:synology-chat:
+  synology-chat`, cursor on the top row). Lock that `selectedListRow` skips the
+  echo + headers and that the navigator's step count lands on the telegram row.
+- `selectedListRow`: returns the ` · ` cursor row, never `❯ /mcp`, never a
+  header.
+- Navigator with TWO plugins present: confirms it targets telegram (not
+  synology-chat) regardless of which is bottommost.
+- `navigateToPluginAction` failure returns `reason:'nav_list'` when no row
+  matches the pattern; monitor emits the operator alert exactly once per
+  down-episode (dedup).
+- Existing §8 submenu tests (connected/failed/disabled, numbered cursor, ✘
+  glyph, input-echo shadow) stay green.
+
+### 9.4 Upstream-impact
+`channel-mcp-reconnect.ts` + `channel-plugin-unlock.ts` are core/upstream; the
+blind Up-walk bites any install with several MCP servers and ≥2 channel
+plugins. **Upstream PR candidate**, §5 gating (fork-local now; generic "any
+channel plugin" framing, no synology specifics).
+
+### 9.5 Verification (real environment)
+- Isolated scratch replicating the 7-server list (real user MCPs +
+  config-named `plugin:telegram:telegram` / `plugin:synology-chat:synology-chat`
+  bogus servers): confirm the navigator deterministically lands on the telegram
+  row and drives Reconnect.
+- OPEN ground-truth item to confirm during impl: is the bare `claude.ai` group
+  line selectable (a collapsible) or a non-selectable label? The step-and-verify
+  loop is robust to either (it re-reads the cursor row each Down), but confirm
+  Down traverses past it cleanly so the cap is never hit on the happy path.
+- After deploy: force telegram failed/disabled with synology-chat alive ->
+  `channel-mcp-reconnect: completed` (not `submenu not found`); channel
+  recovers via the soft stage (not via self-heal).
+- 24h watch: no `gave_up`, no loop.
+
+> Status: PLAN for review. Planning-first — **awaiting EFiveen plan-review +
+> code-GO before writing code.** §8 acute fix already shipped (74b4e00) and is
+> live; this builds on it.

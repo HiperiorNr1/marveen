@@ -37,8 +37,9 @@
 import { execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
-import type { ChannelProviderType } from '../channel-provider.js'
+import { type ChannelProviderType, getProvider } from '../channel-provider.js'
 import { hasProviderPoller } from './channel-poller-liveness.js'
+import { driveMcpPluginAction } from './channel-mcp-reconnect.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -57,18 +58,6 @@ const UNLOCK_PROBE_DELAY_MS = 35_000
 // which can be delayed if Telegram's long-poll happens to be quiet.
 const UNLOCK_PROBE_RETRY_DELAY_MS = 15_000
 const UNLOCK_PROBE_MAX_RETRIES = 2
-
-// Per-keystroke settling delays. Match the channels.sh script: opening /mcp
-// renders the server list (~3s), Up scrolls to the bottom of the list (~1s),
-// the first Enter opens the menu (~2s), the second Enter activates it (~3s).
-const MCP_OPEN_SETTLE_MS = 3000
-const KEYSTROKE_SETTLE_MS = 1500
-// After the second Enter activates Enable/Reconnect, the plugin handshake
-// takes a moment and Claude Code renders an action confirmation toast.
-// Wait long enough for the toast to settle before Escape, otherwise the
-// first Escape can be swallowed by the toast dismiss instead of backing
-// out of the action menu.
-const POST_UNLOCK_SETTLE_MS = 3000
 
 function getSessionClaudePid(session: string): number | null {
   try {
@@ -116,41 +105,33 @@ function isSessionReadyForUnlock(session: string): boolean {
   }
 }
 
-function sendUnlockKeystrokes(session: string): void {
-  try {
-    // Open the MCP dialog. Claude renders the server list within ~2s; the
-    // 3s settle ensures the cursor is on the first item before we move.
-    execFileSync(TMUX, ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(MCP_OPEN_SETTLE_MS / 1000)], { timeout: MCP_OPEN_SETTLE_MS + 2000 })
-    // Up wraps to the bottom of the list, where the plugin servers live
-    // (claude lists them last). Built-in MCPs are above Plugin MCPs in the
-    // sort order, so the bottommost entry is the channel plugin we want.
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Up'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(KEYSTROKE_SETTLE_MS / 1000)], { timeout: KEYSTROKE_SETTLE_MS + 2000 })
-    // First Enter opens the action menu for the selected MCP server.
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(KEYSTROKE_SETTLE_MS / 1000)], { timeout: KEYSTROKE_SETTLE_MS + 2000 })
-    // Second Enter activates the first action - "Enable" for disabled,
-    // "Reconnect" for failed. Both revive the plugin.
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
-    // After activation, the pane stays in the MCP server list (Claude Code
-    // does NOT auto-dismiss to the prompt). detectPaneState reads that as
-    // non-idle, every scheduled tick + inter-agent msg piles up with
-    // "Schedule target session busy" until someone manually presses Esc.
-    // 2026-06-01 19:25 incident: the unlock probe recovered the plugin at
-    // 19:27:16, but the pane stayed wedged in the MCP list until manual
-    // Escape at 19:40 -- 13 minutes of dropped traffic. Escape twice to
-    // back out of both menu levels (action menu -> server list -> idle
-    // prompt), with a settle between so the first Escape lands before
-    // the second arrives.
-    execFileSync('/bin/sleep', [String(POST_UNLOCK_SETTLE_MS / 1000)], { timeout: POST_UNLOCK_SETTLE_MS + 2000 })
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(KEYSTROKE_SETTLE_MS / 1000)], { timeout: KEYSTROKE_SETTLE_MS + 2000 })
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
-    logger.warn({ session }, 'channel-plugin-unlock: sent /mcp+Up+Enter+Enter+Esc+Esc unlock sequence')
-  } catch (err) {
-    logger.error({ err, session }, 'channel-plugin-unlock: failed to deliver unlock keystrokes')
+function runUnlock(session: string, provider: ChannelProviderType): void {
+  // List-driven navigator (telegram-reconnect-loop-fix-2026-06-02 §9):
+  // replaces the blind /mcp + Up + Enter + Enter sequence. The blind Up
+  // assumed the channel plugin was bottommost of the server list -- no longer
+  // safe with TWO channel plugins enabled (one Up could land on the wrong
+  // plugin's row and Enable the wrong service). The shared navigator parses
+  // the list and steps the cursor onto the row whose text matches THIS
+  // provider's plugin pattern, then activates Reconnect / Enable per status.
+  //
+  // Gates kept (the §9 plan-review A point): the unlock probe still requires
+  // hasProviderPoller(claudePid, provider) === false AND
+  // isSessionReadyForUnlock(session) BEFORE the navigator runs (caller
+  // verifies both). The navigator itself returns `nav_list` / `capture` and
+  // exits safely if the pane is still half-rendered, so a stale TUI cannot
+  // drive a wrong row.
+  const pluginPaneId = getProvider(provider).pluginPaneId
+  const escaped = pluginPaneId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pluginPattern = new RegExp(escaped, 'i')
+  const r = driveMcpPluginAction(session, pluginPattern)
+  if (!r.ok) {
+    logger.warn(
+      { session, provider, reason: r.reason, message: r.message },
+      'channel-plugin-unlock: navigator declined to act (unlock skipped this cycle)',
+    )
+    return
   }
+  logger.warn({ session, provider }, 'channel-plugin-unlock: list-driven unlock activated via /mcp')
 }
 
 interface UnlockProbeState {
@@ -191,7 +172,7 @@ function runUnlockProbe(state: UnlockProbeState): void {
     { session: state.session, claudePid, provider: state.provider },
     'channel-plugin-unlock: provider poller absent after cold-start window, firing /mcp unlock sequence',
   )
-  sendUnlockKeystrokes(state.session)
+  runUnlock(state.session, state.provider)
 }
 
 /**
