@@ -11,6 +11,7 @@ import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
+import { startSynoChatWorker } from './web/synochat-worker.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
 import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
@@ -260,6 +261,9 @@ export function startWebServer(port = 3420): http.Server {
 
   const updateCheckerInterval = startUpdateChecker()
   logger.info('Update checker started (15min poll)')
+
+  const synoChatWorkerInterval = startSynoChatWorker()
+  logger.info('SynoChat worker started (5s poll, queue->agent bridge)')
 
   // NOTE: startMcpListChecker() is intentionally NOT called here.
   //
