@@ -86,7 +86,8 @@ function switchPage(pageId) {
   if (pageId === 'vault') loadVaultPage()
   if (pageId === 'autonomy') loadAutonomy()
   if (pageId === 'updates') loadUpdates()
-  if (pageId === 'team') { loadTeamGraph(); loadTeamMessages(); populateMsgComposeTargets() }
+  if (pageId === 'team') { loadTeamGraph() }
+  if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'ideas') loadIdeasPage()
 }
@@ -7126,56 +7127,6 @@ const MSG_STATUS_META = {
   done: { label: 'kész', cls: 'badge-active' },
   failed: { label: 'hibás', cls: 'badge-paused' },
 }
-let msgComposeReady = false
-
-async function loadTeamMessages() {
-  const list = document.getElementById('teamMessageList')
-  if (!list) return
-  const filter = document.getElementById('msgFilter')?.value || ''
-  try {
-    const q = filter ? `?status=${encodeURIComponent(filter)}&limit=50` : '?limit=50'
-    const res = await fetch('/api/messages' + q)
-    if (!res.ok) throw new Error('HTTP ' + res.status)
-    const msgs = await res.json()
-    if (!Array.isArray(msgs) || msgs.length === 0) {
-      list.innerHTML = '<p class="activity-empty">Nincs üzenet.</p>'
-      return
-    }
-    list.innerHTML = msgs.map(m => {
-      const meta = MSG_STATUS_META[m.status] || { label: m.status || '-', cls: 'badge' }
-      const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU') : ''
-      return `<div class="team-message">
-        <div class="team-message-head">
-          <span class="team-message-route">${escapeHtml(m.from_agent)} &rarr; ${escapeHtml(m.to_agent)}</span>
-          <span class="badge ${meta.cls}">${escapeHtml(meta.label)}</span>
-        </div>
-        <div class="team-message-body">${escapeHtml(m.content)}</div>
-        <div class="team-message-time">${escapeHtml(when)}</div>
-      </div>`
-    }).join('')
-  } catch (e) {
-    list.innerHTML = '<p class="activity-empty">Nem sikerült betölteni az üzeneteket: ' + escapeHtml(String(e.message || e)) + '</p>'
-  }
-}
-
-async function populateMsgComposeTargets() {
-  const sel = document.getElementById('msgComposeTo')
-  if (!sel || msgComposeReady) return
-  try {
-    const res = await fetch('/api/schedules/agents')
-    if (!res.ok) return
-    const agents = await res.json()
-    sel.innerHTML = ''
-    for (const a of agents) {
-      const opt = document.createElement('option')
-      opt.value = a.name
-      opt.textContent = a.label || a.name
-      sel.appendChild(opt)
-    }
-    msgComposeReady = true
-  } catch { /* leave empty; send will warn */ }
-}
-
 async function resolveOwnerName() {
   try {
     const res = await fetch('/api/kanban/assignees')
@@ -7188,33 +7139,300 @@ async function resolveOwnerName() {
   return 'owner'
 }
 
-async function sendComposeMessage() {
-  const to = document.getElementById('msgComposeTo').value
-  const content = document.getElementById('msgComposeContent').value.trim()
-  if (!to) { showToast('Válassz címzett ügynököt'); return }
-  if (!content) { document.getElementById('msgComposeContent').focus(); return }
-  const btn = document.getElementById('msgComposeSend')
-  btn.disabled = true
+// === Messages page ===
+// chatAgentHasAvatar: populated from /api/agents during loadChatAgentList
+const chatAgentHasAvatar = new Map() // name -> true|false
+let chatSelectedAgent = null
+
+function chatMonogramEl(agentName, size) {
+  const letter = agentName.charAt(0).toUpperCase()
+  const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
+  const color = colors[agentName.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
+  return `<div class="chat-avatar chat-avatar-mono" style="width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px">${letter}</div>`
+}
+
+// Global onerror handler — avoids HTML-in-attribute escaping issues
+window.chatImgError = function(img) {
+  const name = img.getAttribute('data-agent-name') || img.alt || '?'
+  const size = parseInt(img.width) || 32
+  const letter = name.charAt(0).toUpperCase()
+  const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
+  const color = colors[name.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
+  const div = document.createElement('div')
+  div.className = 'chat-avatar chat-avatar-mono'
+  div.style.cssText = `width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px`
+  div.textContent = letter
+  img.replaceWith(div)
+}
+
+function chatAvatarHtml(agentName, size = 32) {
+  const lower = agentName.toLowerCase()
+  const hasAvatar = chatAgentHasAvatar.get(lower)
+  if (!hasAvatar) return chatMonogramEl(agentName, size)
+  const src = lower === 'marveen'
+    ? `/api/marveen/avatar?t=${Date.now()}`
+    : `/api/agents/${encodeURIComponent(lower)}/avatar?t=${Date.now()}`
+  return `<img class="chat-avatar" src="${src}" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" data-agent-name="${escapeHtml(agentName)}" onerror="chatImgError(this)">`
+}
+
+async function loadMessagesPage() {
+  await loadChatAgentList()
+}
+
+const CHAT_SYSTEM_AGENTS = new Set(['heartbeat','telegram-coordinator','channel-coordinator'])
+
+async function loadChatAgentList() {
+  const sidebar = document.getElementById('chatAgentList')
+  if (!sidebar) return
+  try {
+    // Load fleet agents + threads in parallel
+    const [agentsRes, threadsRes] = await Promise.all([
+      fetch('/api/agents'),
+      fetch('/api/messages/threads'),
+    ])
+    const agentsRaw = agentsRes.ok ? await agentsRes.json() : []
+    const threads = threadsRes.ok ? await threadsRes.json() : []
+
+    // Build fleet list: API agents + marveen, minus system agents
+    const fleetNames = ['marveen', ...agentsRaw.map(a => a.name || a)]
+      .filter(n => !CHAT_SYSTEM_AGENTS.has(n))
+      .filter((n, i, arr) => arr.indexOf(n) === i)
+
+    // Populate avatar map from API data
+    chatAgentHasAvatar.clear()
+    chatAgentHasAvatar.set('marveen', true)
+    for (const a of agentsRaw) {
+      if (a.name) chatAgentHasAvatar.set(a.name, !!a.hasAvatar)
+    }
+
+    // Build index from /api/messages/threads (per-agent, no global-window bug)
+    const threadIndex = new Map() // agentName -> {lastMessage, count}
+    for (const t of threads) {
+      if (t.agent) threadIndex.set(t.agent, { lastMsg: t.lastMessage, count: t.count || 0 })
+    }
+    // Also include thread agents not in fleet (e.g. Szabolcs/owner direct msgs)
+    for (const t of threads) {
+      if (t.agent && !fleetNames.includes(t.agent) && !CHAT_SYSTEM_AGENTS.has(t.agent)) {
+        fleetNames.push(t.agent)
+      }
+    }
+
+    // Sort: agents with messages first (by recency), rest alphabetical
+    const sorted = [...fleetNames].sort((a, b) => {
+      const aHas = threadIndex.has(a), bHas = threadIndex.has(b)
+      if (aHas && !bHas) return -1
+      if (!aHas && bHas) return 1
+      if (aHas && bHas) {
+        const aTime = threadIndex.get(a).lastMsg?.created_at || 0
+        const bTime = threadIndex.get(b).lastMsg?.created_at || 0
+        return bTime - aTime
+      }
+      return a.localeCompare(b)
+    })
+
+    sidebar.innerHTML = sorted.map(name => {
+      const info = threadIndex.get(name)
+      const lm = info?.lastMsg
+      const when = lm?.created_at ? new Date(lm.created_at * 1000).toLocaleTimeString('hu-HU', {hour:'2-digit',minute:'2-digit'}) : ''
+      const preview = lm ? (lm.content || '').replace(/\n/g,' ').slice(0, 60) : 'Nincs üzenet'
+      const isSelected = name === chatSelectedAgent ? ' selected' : ''
+      const dimmed = info ? '' : ' style="opacity:0.5"'
+      return `<div class="chat-agent-item${isSelected}" data-agent="${escapeHtml(name)}"${dimmed}>
+        <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
+        <div class="chat-agent-info">
+          <div class="chat-agent-name">${escapeHtml(name)}</div>
+          <div class="chat-agent-preview">${escapeHtml(preview)}</div>
+        </div>
+        <div class="chat-agent-time">${when}</div>
+      </div>`
+    }).join('')
+
+    sidebar.querySelectorAll('.chat-agent-item').forEach(el => {
+      el.addEventListener('click', () => {
+        sidebar.querySelectorAll('.chat-agent-item').forEach(x => x.classList.remove('selected'))
+        el.classList.add('selected')
+        chatSelectedAgent = el.dataset.agent
+        loadChatThread(chatSelectedAgent)
+      })
+    })
+
+    if (!chatSelectedAgent) {
+      const first = sidebar.querySelector('.chat-agent-item')
+      if (first) first.click()
+    }
+  } catch (e) {
+    sidebar.innerHTML = `<div class="chat-sidebar-empty">Hiba: ${escapeHtml(String(e.message||e))}</div>`
+  }
+}
+
+// Pagination state for the open thread
+const chatThreadState = { agent: null, minLoadedId: null, hasMore: true, loading: false }
+const CHAT_PAGE_SIZE = 10
+const CHAT_LOAD_MORE = 20
+
+async function loadChatThread(agentName) {
+  const panel = document.getElementById('chatThreadPanel')
+  if (!panel) return
+
+  chatThreadState.agent = agentName
+  chatThreadState.minLoadedId = null
+  chatThreadState.hasMore = true
+  chatThreadState.loading = false
+
+  panel.innerHTML = `
+    <div class="chat-thread-header">
+      ${chatAvatarHtml(agentName, 32)}
+      <span class="chat-thread-title">${escapeHtml(agentName)}</span>
+      <button class="btn-secondary btn-compact" style="margin-left:auto" onclick="loadChatThread('${escapeHtml(agentName)}')">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </div>
+    <div class="chat-bubbles" id="chatBubbles"><div class="chat-loading-indicator" id="chatLoadingTop" style="display:none;text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">Betöltés...</div></div>
+    <div class="chat-compose">
+      <div class="chat-compose-row">
+        <textarea id="chatComposeText" class="chat-compose-input" rows="2" placeholder="Üzenet ${escapeHtml(agentName)}-nek..."></textarea>
+        <button class="btn-primary btn-compact chat-send-btn" id="chatSendBtn">Küldés</button>
+      </div>
+    </div>
+  `
+
+  document.getElementById('chatSendBtn')?.addEventListener('click', () => sendChatMessage(agentName))
+  document.getElementById('chatComposeText')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChatMessage(agentName) }
+  })
+
+  // Initial load
+  await fetchChatPage(agentName, null, CHAT_PAGE_SIZE, 'replace')
+
+  // Scroll-up pagination handler
+  const bubbles = document.getElementById('chatBubbles')
+  if (bubbles) {
+    bubbles.addEventListener('scroll', () => {
+      if (bubbles.scrollTop < 80 && chatThreadState.hasMore && !chatThreadState.loading
+          && chatThreadState.agent === agentName) {
+        fetchChatPage(agentName, chatThreadState.minLoadedId, CHAT_LOAD_MORE, 'prepend')
+      }
+    })
+  }
+}
+
+function buildBubbleHtml(m) {
+  const isOutgoing = m.from_agent === 'marveen'
+  const senderName = isOutgoing ? 'marveen' : m.from_agent
+  const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''
+  const statusMeta = MSG_STATUS_META[m.status] || { label: m.status || '', cls: 'badge' }
+  return `<div class="chat-bubble-row ${isOutgoing ? 'outgoing' : 'incoming'}" data-msg-id="${m.id}">
+    ${!isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(senderName, 28)}</div>` : ''}
+    <div class="chat-bubble ${isOutgoing ? 'bubble-out' : 'bubble-in'}">
+      <div class="bubble-meta">
+        ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderName)}</span>` : ''}
+        <span class="bubble-id-chip">#${m.id}</span>
+        <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
+      </div>
+      <div class="bubble-text">${escapeHtml(m.content || '')}</div>
+      <div class="bubble-time">${when}</div>
+    </div>
+    ${isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml('marveen', 28)}</div>` : ''}
+  </div>`
+}
+
+async function fetchChatPage(agentName, beforeId, limit, mode) {
+  if (chatThreadState.loading) return
+  chatThreadState.loading = true
+  const container = document.getElementById('chatBubbles')
+  const loadingIndicator = document.getElementById('chatLoadingTop')
+  if (!container) { chatThreadState.loading = false; return }
+  if (loadingIndicator && mode === 'prepend') loadingIndicator.style.display = 'block'
+  try {
+    let url = `/api/messages?agent=${encodeURIComponent(agentName)}&limit=${limit}`
+    if (beforeId) url += `&before=${beforeId}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const msgs = await res.json()
+    const sorted = Array.isArray(msgs) ? [...msgs].sort((a, b) => (a.created_at || 0) - (b.created_at || 0)) : []
+
+    if (mode === 'replace') {
+      if (sorted.length === 0) {
+        container.innerHTML = '<p class="activity-empty">Nincs üzenet ebben a szálban.</p>'
+      } else {
+        container.innerHTML = '<div class="chat-loading-indicator" id="chatLoadingTop" style="display:none;text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">Betöltés...</div>'
+        container.insertAdjacentHTML('beforeend', sorted.map(buildBubbleHtml).join(''))
+        container.scrollTop = container.scrollHeight
+      }
+      if (sorted.length < limit) chatThreadState.hasMore = false
+    } else { // prepend
+      if (loadingIndicator) loadingIndicator.style.display = 'none'
+      if (!sorted.length) { chatThreadState.hasMore = false; chatThreadState.loading = false; return }
+      if (sorted.length < limit) chatThreadState.hasMore = false
+      const prevHeight = container.scrollHeight
+      const indicator = document.getElementById('chatLoadingTop')
+      const html = sorted.map(buildBubbleHtml).join('')
+      if (indicator) {
+        indicator.insertAdjacentHTML('afterend', html)
+      } else {
+        container.insertAdjacentHTML('afterbegin', html)
+      }
+      // Restore scroll position so view doesn't jump
+      container.scrollTop = container.scrollHeight - prevHeight
+    }
+
+    if (sorted.length > 0) {
+      const minId = Math.min(...sorted.map(m => m.id))
+      if (chatThreadState.minLoadedId === null || minId < chatThreadState.minLoadedId) {
+        chatThreadState.minLoadedId = minId
+      }
+    }
+  } catch (e) {
+    if (loadingIndicator) loadingIndicator.style.display = 'none'
+    if (mode === 'replace') {
+      container.innerHTML = `<p class="activity-empty">Hiba: ${escapeHtml(String(e.message||e))}</p>`
+    }
+  } finally {
+    chatThreadState.loading = false
+  }
+}
+
+function renderChatBubbles(msgs, agentName) {
+  const container = document.getElementById('chatBubbles')
+  if (!container) return
+  if (!msgs || msgs.length === 0) {
+    container.innerHTML = '<p class="activity-empty">Nincs üzenet ebben a szálban.</p>'
+    return
+  }
+  const sorted = [...msgs].sort((a,b) => (a.created_at||0) - (b.created_at||0))
+  container.innerHTML = sorted.map(buildBubbleHtml).join('')
+  container.scrollTop = container.scrollHeight
+}
+
+async function sendChatMessage(toAgent) {
+  const textarea = document.getElementById('chatComposeText')
+  const btn = document.getElementById('chatSendBtn')
+  const content = textarea?.value?.trim()
+  if (!content) { textarea?.focus(); return }
+  if (btn) btn.disabled = true
   try {
     const from = await resolveOwnerName()
     const res = await fetch('/api/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to, content }),
+      body: JSON.stringify({ from, to: toAgent, content }),
     })
     if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'Hiba') }
-    document.getElementById('msgComposeContent').value = ''
+    if (textarea) textarea.value = ''
     showToast('Üzenet elküldve')
-    loadTeamMessages()
+    await loadChatThread(toAgent)
+    await loadChatAgentList()
   } catch (e) {
     showToast('Hiba: ' + (e.message || e))
   } finally {
-    btn.disabled = false
+    if (btn) btn.disabled = false
   }
 }
 
-document.getElementById('msgFilter')?.addEventListener('change', loadTeamMessages)
-document.getElementById('msgComposeSend')?.addEventListener('click', sendComposeMessage)
+document.getElementById('chatRefreshBtn')?.addEventListener('click', () => {
+  loadChatAgentList()
+  if (chatSelectedAgent) loadChatThread(chatSelectedAgent)
+})
 
 function renderTeamEditor(agent, allAgents) {
   const team = agent.team || { role: 'member', reportsTo: null, delegatesTo: [], autoDelegation: false, trustFrom: [] }

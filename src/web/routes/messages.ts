@@ -1,5 +1,6 @@
 import {
   createAgentMessage, getPendingMessages, listAgentMessages,
+  getAgentConversation, getAgentConversationThreads,
   markMessageDone, markMessageFailed,
   type AgentMessage,
 } from '../../db.js'
@@ -45,22 +46,31 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Sidebar threads: one row per conversation peer (system agents excluded),
+  // each with its count + most-recent message, recency computed per-peer.
+  if (path === '/api/messages/threads' && method === 'GET') {
+    json(res, getAgentConversationThreads())
+    return true
+  }
+
   if (path === '/api/messages' && method === 'GET') {
     const agent = url.searchParams.get('agent') || ''
     const status = url.searchParams.get('status') || ''
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
+    const beforeRaw = url.searchParams.get('before')
+    const before = beforeRaw !== null ? parseInt(beforeRaw, 10) : undefined
 
     let messages: AgentMessage[]
     if (status === 'pending' && agent) {
       messages = getPendingMessages(agent)
     } else if (status === 'pending') {
       messages = getPendingMessages()
+    } else if (agent) {
+      // SQL-filtered to THIS agent's last N (+ before-cursor pagination), not
+      // global-last-N-then-JS-filter which starved rarely-active threads.
+      messages = getAgentConversation(agent, limit, Number.isFinite(before as number) ? before : undefined)
     } else {
       messages = listAgentMessages(limit)
-    }
-
-    if (agent && status !== 'pending') {
-      messages = messages.filter(m => m.from_agent === agent || m.to_agent === agent)
     }
 
     json(res, messages)

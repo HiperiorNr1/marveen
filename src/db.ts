@@ -29,20 +29,26 @@ function tightenDbPermissions(dbPath: string): void {
   }
 }
 
-export function initDatabase(): void {
-  mkdirSync(STORE_DIR, { recursive: true })
+// dbPathOverride is for tests: pass ':memory:' (or a temp path) to open an
+// isolated database instead of the real store/claudeclaw.db. The file-precreate
+// (openSync 'wx') and tightenDbPermissions steps are SKIPPED for an override --
+// they only make sense for a real on-disk store file, and ':memory:' has no path
+// to chmod. This keeps tests idempotent and stops them polluting the prod DB.
+export function initDatabase(dbPathOverride?: string): void {
+  const useOverride = dbPathOverride !== undefined
+  if (!useOverride) mkdirSync(STORE_DIR, { recursive: true })
   // Idempotent re-init: close a previous handle before opening a new one
   // so repeated calls (tests, hot-reload, recovery paths) do not leak
   // the old better-sqlite3 fd.
   if (db) {
     try { db.close() } catch { /* already closed */ }
   }
-  const dbPath = join(STORE_DIR, DB_FILENAME)
+  const dbPath = useOverride ? dbPathOverride! : join(STORE_DIR, DB_FILENAME)
   // Step 1: close the TOCTOU window on fresh installs. openSync with 'wx'
   // + 0o600 creates the file ONLY if it doesn't exist and sets the strict
   // mode atomically. better-sqlite3 then opens the existing file rather
-  // than creating one at the default umask.
-  if (!existsSync(dbPath)) {
+  // than creating one at the default umask. Skipped for a test override.
+  if (!useOverride && !existsSync(dbPath)) {
     try {
       closeSync(openSync(dbPath, 'wx', 0o600))
     } catch (err) {
@@ -56,7 +62,7 @@ export function initDatabase(): void {
   }
   db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
-  tightenDbPermissions(dbPath)
+  if (!useOverride) tightenDbPermissions(dbPath)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
@@ -1157,6 +1163,74 @@ export function markMessageFailed(id: number, error?: string): boolean {
 
 export function listAgentMessages(limit = 50): AgentMessage[] {
   return db.prepare('SELECT * FROM agent_messages ORDER BY created_at DESC LIMIT ?').all(limit) as AgentMessage[]
+}
+
+// System/automation participants that are not real conversation peers. They are
+// excluded as THREAD rows in the dashboard sidebar (you don't chat with the
+// heartbeat or the coordinator), but messages involving them still count toward
+// the human/agent peer they are paired with (so a thread's count matches what
+// getAgentConversation returns when you open it).
+export const CHAT_SYSTEM_AGENTS = ['heartbeat', 'telegram-coordinator', 'channel-coordinator', 'system'] as const
+
+const AGENT_MESSAGE_LIMIT_CAP = 200
+
+// The actual last-N messages for ONE agent, filtered in SQL (NOT global-last-N
+// then JS-filter -- that starved rarely-active agents' threads, dashboard bug
+// 2026-06-03). `beforeId` pages older: pass the oldest id you already have to
+// fetch the next-older batch (scroll-up pagination). Newest-first.
+export function getAgentConversation(agent: string, limit = 50, beforeId?: number): AgentMessage[] {
+  const cap = Math.min(Math.max(1, Math.floor(limit) || 1), AGENT_MESSAGE_LIMIT_CAP)
+  if (beforeId !== undefined && Number.isFinite(beforeId)) {
+    return db.prepare(
+      'SELECT * FROM agent_messages WHERE (from_agent = ? OR to_agent = ?) AND id < ? ORDER BY created_at DESC, id DESC LIMIT ?'
+    ).all(agent, agent, beforeId, cap) as AgentMessage[]
+  }
+  return db.prepare(
+    'SELECT * FROM agent_messages WHERE (from_agent = ? OR to_agent = ?) ORDER BY created_at DESC, id DESC LIMIT ?'
+  ).all(agent, agent, cap) as AgentMessage[]
+}
+
+export interface AgentThread {
+  agent: string
+  count: number
+  lastMessage: AgentMessage | null
+}
+
+// One row per distinct conversation peer (from_agent OR to_agent), excluding
+// CHAT_SYSTEM_AGENTS, each with its total message count and its most-recent
+// message. Drives the dashboard sidebar. Recency is computed per-peer (max
+// created_at) so a rarely-active peer's last message is never hidden behind the
+// global recency window (the bug the JS-filter path had). Sorted newest-first.
+export function getAgentConversationThreads(): AgentThread[] {
+  const parties = db.prepare(`
+    WITH parties AS (
+      SELECT from_agent AS agent FROM agent_messages
+      UNION
+      SELECT to_agent AS agent FROM agent_messages
+    )
+    SELECT p.agent AS agent,
+      (SELECT COUNT(*) FROM agent_messages m WHERE m.from_agent = p.agent OR m.to_agent = p.agent) AS count
+    FROM parties p
+  `).all() as { agent: string; count: number }[]
+
+  const lastStmt = db.prepare(
+    'SELECT * FROM agent_messages WHERE from_agent = ? OR to_agent = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+  )
+
+  const system = new Set<string>(CHAT_SYSTEM_AGENTS)
+  const threads: AgentThread[] = []
+  for (const p of parties) {
+    if (!p.agent || system.has(p.agent)) continue
+    const lastMessage = (lastStmt.get(p.agent, p.agent) as AgentMessage | undefined) ?? null
+    threads.push({ agent: p.agent, count: p.count, lastMessage })
+  }
+  threads.sort((a, b) => {
+    const ca = a.lastMessage?.created_at ?? 0
+    const cb = b.lastMessage?.created_at ?? 0
+    if (cb !== ca) return cb - ca
+    return (b.lastMessage?.id ?? 0) - (a.lastMessage?.id ?? 0) // tiebreak: newest id first
+  })
+  return threads
 }
 
 // --- Task Run History ---
