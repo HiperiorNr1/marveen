@@ -95,6 +95,22 @@ MODEL_FLAG=""
 # tmux command-string round-trip without the inner shell glob-expanding `[1m]`.
 [ -n "$MAIN_MODEL" ] && MODEL_FLAG="--model '$MAIN_MODEL' "
 
+# SIGTERM trap: log reason + dump pane content before dying so we can
+# diagnose why channels.sh was killed (systemd restart, dashboard, etc.).
+_sigterm_handler() {
+  local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "${ts} channels.sh PID=$$ received SIGTERM" >> "$INSTALL_DIR/store/channels-failures.log"
+  if [ -n "${TMUX:-}" ] && $TMUX has-session -t "$SESSION" 2>/dev/null; then
+    {
+      echo "=== CRASH DUMP ${ts} ==="
+      $TMUX capture-pane -t "$SESSION" -p 2>/dev/null || true
+      echo "=== END ==="
+    } >> "$INSTALL_DIR/store/channels-crash-dump.log"
+  fi
+  exit 143
+}
+trap '_sigterm_handler' TERM
+
 # Régi session takarítás
 $TMUX kill-session -t "$SESSION" 2>/dev/null
 
