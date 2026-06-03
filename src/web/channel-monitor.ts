@@ -30,6 +30,7 @@ import { shouldAutoRestartDownAgent, parseEtimeToSeconds } from './agent-restart
 // getClaudePidForSession + hasChannelPluginAlive live in the shared liveness
 // module so the standalone channel-coordinator reuses the exact same probe.
 import { getClaudePidForSession, hasChannelPluginAlive } from '../channel-coordinator/liveness.js'
+import { getDesiredAgents } from './agent-desired-state.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -767,9 +768,52 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
       }
     }
+
+    // Desired-state reconciliation: bring back agents the operator wants
+    // running but whose tmux session vanished entirely (shared tmux server
+    // killed by a channels-unit restart, or a machine reboot). The per-target
+    // loop above only handles sessions that still exist with a dead plugin.
+    // Staggered to avoid the simultaneous-start race that kills agents.
+    void reconcileDesiredAgents()
   }
   setTimeout(check, 30000)
   return setInterval(check, 60000)
+}
+
+// Start desired-but-missing agents one at a time (~15s apart). The stagger is
+// mandatory: starting several channel agents at once makes them all die in the
+// resume-from-summary modal race. A single in-flight burst at a time.
+let reconcileBurstInProgress = false
+const AGENT_RECONCILE_STAGGER_MS = 15000
+function delay(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
+
+async function reconcileDesiredAgents(): Promise<void> {
+  if (reconcileBurstInProgress) return
+  const desired = getDesiredAgents()
+  if (desired.size === 0) return
+  const down = [...desired].filter((name) => !isAgentRunning(name))
+  if (down.length === 0) return
+  reconcileBurstInProgress = true
+  try {
+    for (const name of down) {
+      if (isAgentRunning(name)) continue
+      const last = agentLastRestart.get(name)
+      if (last != null && Date.now() - last < AGENT_RESTART_GRACE_MS) continue
+      logger.warn({ agent: name }, 'Desired agent not running -- auto-starting (reconcile)')
+      try {
+        const r = startAgentProcess(name)
+        agentLastRestart.set(name, Date.now())
+        if (!r.ok && r.error !== 'Agent is already running') {
+          logger.error({ agent: name, error: r.error }, 'Reconcile start failed')
+        }
+      } catch (err) {
+        logger.error({ err, agent: name }, 'Reconcile start threw')
+      }
+      await delay(AGENT_RECONCILE_STAGGER_MS)
+    }
+  } finally {
+    reconcileBurstInProgress = false
+  }
 }
 
 // Backward-compatible alias
