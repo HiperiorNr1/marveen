@@ -447,6 +447,57 @@ export function initDatabase(): void {
     )
   `)
 
+  // --- Idea Box ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS idea_box (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT,
+      category TEXT NOT NULL DEFAULT 'Egyéb',
+      status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','reviewed','kanban','rejected')),
+      source TEXT NOT NULL DEFAULT 'marveen',
+      kanban_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_status ON idea_box(status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_category ON idea_box(category)`)
+
+  // --- Workflow Recordings ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_recordings (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      trigger_keywords TEXT NOT NULL DEFAULT '',
+      steps_json TEXT NOT NULL DEFAULT '[]',
+      run_count INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      agent_id TEXT NOT NULL DEFAULT 'marveen',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_agent ON workflow_recordings(agent_id)`)
+  try { db.exec('ALTER TABLE workflow_recordings ADD COLUMN trigger_description TEXT') } catch { }
+  try { db.exec('ALTER TABLE workflow_recordings ADD COLUMN embedding TEXT') } catch { }
+  try { db.exec("ALTER TABLE workflow_recordings ADD COLUMN branch_stats_json TEXT NOT NULL DEFAULT '{}'") } catch { }
+
+  // --- Tool Call Log (auto-recorder) ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tool_call_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      input_summary TEXT,
+      success INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_session ON tool_call_log(session_id, created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_ts ON tool_call_log(created_at)`)
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
@@ -1400,4 +1451,320 @@ export function updateChannelRequestStatus(id: number, status: 'approved' | 'den
 
 export function updateChannelRequestName(id: number, channelName: string): void {
   db.prepare('UPDATE pending_channel_requests SET channel_name = ? WHERE id = ?').run(channelName, id)
+}
+
+// --- Telegram History ---
+
+export function saveTelegramMessage(
+  chatId: string,
+  messageId: string,
+  direction: 'in' | 'out',
+  text: string,
+  userId?: string,
+  ts?: number,
+): void {
+  const now = ts ?? Math.floor(Date.now() / 1000)
+  db.prepare(
+    `INSERT OR IGNORE INTO telegram_history (chat_id, message_id, user_id, direction, text, ts)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(chatId, messageId, userId ?? null, direction, text, now)
+}
+
+export interface TelegramHistoryRow {
+  id: number
+  chat_id: string
+  message_id: string
+  user_id: string | null
+  direction: 'in' | 'out'
+  text: string
+  ts: number
+}
+
+export function getTelegramHistory(chatId: string, limit: number = 50): TelegramHistoryRow[] {
+  return db.prepare(
+    'SELECT * FROM telegram_history WHERE chat_id = ? ORDER BY ts DESC LIMIT ?'
+  ).all(chatId, limit) as TelegramHistoryRow[]
+}
+
+// --- Idea Box ---
+
+export interface IdeaBoxRow {
+  id: string
+  title: string
+  description: string | null
+  category: string
+  status: 'new' | 'reviewed' | 'kanban' | 'rejected'
+  source: string
+  kanban_id: string | null
+  created_at: number
+  updated_at: number
+}
+
+export function listIdeas(opts?: { status?: string; category?: string }): IdeaBoxRow[] {
+  let q = 'SELECT * FROM idea_box WHERE 1=1'
+  const params: string[] = []
+  if (opts?.status) { q += ' AND status = ?'; params.push(opts.status) }
+  if (opts?.category) { q += ' AND category = ?'; params.push(opts.category) }
+  q += ' ORDER BY created_at DESC'
+  return db.prepare(q).all(...params) as IdeaBoxRow[]
+}
+
+export function createIdea(idea: Omit<IdeaBoxRow, 'created_at' | 'updated_at'>): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(
+    `INSERT INTO idea_box (id, title, description, category, status, source, kanban_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(idea.id, idea.title, idea.description ?? null, idea.category, idea.status, idea.source, idea.kanban_id ?? null, now, now)
+}
+
+export function updateIdea(id: string, patch: Partial<Pick<IdeaBoxRow, 'title' | 'description' | 'category' | 'status' | 'kanban_id'>>): boolean {
+  const now = Math.floor(Date.now() / 1000)
+  const sets: string[] = ['updated_at = ?']
+  const params: unknown[] = [now]
+  if (patch.title !== undefined) { sets.push('title = ?'); params.push(patch.title) }
+  if (patch.description !== undefined) { sets.push('description = ?'); params.push(patch.description) }
+  if (patch.category !== undefined) { sets.push('category = ?'); params.push(patch.category) }
+  if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status) }
+  if (patch.kanban_id !== undefined) { sets.push('kanban_id = ?'); params.push(patch.kanban_id) }
+  params.push(id)
+  return db.prepare(`UPDATE idea_box SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
+}
+
+export function deleteIdea(id: string): boolean {
+  return db.prepare('DELETE FROM idea_box WHERE id = ?').run(id).changes > 0
+}
+
+export function listIdeaCategories(): string[] {
+  return (db.prepare('SELECT DISTINCT category FROM idea_box ORDER BY category').all() as { category: string }[]).map(r => r.category)
+}
+
+// --- Workflow Recordings ---
+
+// --- Tool Call Log ---
+
+export function logToolCall(sessionId: string, toolName: string, inputSummary: string | null, success = true): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare('INSERT INTO tool_call_log (session_id, tool_name, input_summary, success, created_at) VALUES (?, ?, ?, ?, ?)').run(sessionId, toolName, inputSummary, success ? 1 : 0, now)
+}
+
+export interface ToolCallLogRow {
+  id: number
+  session_id: string
+  tool_name: string
+  input_summary: string | null
+  success: number
+  created_at: number
+}
+
+export interface WorkflowCandidate {
+  session_id: string
+  tool_calls: ToolCallLogRow[]
+  start_ts: number
+  end_ts: number
+  duration_minutes: number
+}
+
+export function getRecentToolCalls(sinceSecs: number): ToolCallLogRow[] {
+  const cutoff = Math.floor(Date.now() / 1000) - sinceSecs
+  return db.prepare('SELECT * FROM tool_call_log WHERE created_at >= ? ORDER BY created_at ASC').all(cutoff) as ToolCallLogRow[]
+}
+
+export function analyzeWorkflowCandidates(sinceSecs = 3600, minToolCalls = 5, gapSecs = 300): WorkflowCandidate[] {
+  const calls = getRecentToolCalls(sinceSecs)
+  if (calls.length === 0) return []
+
+  // Group by session_id, then split by time gaps > gapSecs
+  const bySession: Map<string, ToolCallLogRow[]> = new Map()
+  for (const c of calls) {
+    if (!bySession.has(c.session_id)) bySession.set(c.session_id, [])
+    bySession.get(c.session_id)!.push(c)
+  }
+
+  const candidates: WorkflowCandidate[] = []
+  for (const [sessionId, sessionCalls] of bySession) {
+    // Split into chunks by time gap
+    const chunks: ToolCallLogRow[][] = []
+    let current: ToolCallLogRow[] = [sessionCalls[0]]
+    for (let i = 1; i < sessionCalls.length; i++) {
+      if (sessionCalls[i].created_at - sessionCalls[i - 1].created_at > gapSecs) {
+        chunks.push(current)
+        current = []
+      }
+      current.push(sessionCalls[i])
+    }
+    chunks.push(current)
+
+    for (const chunk of chunks) {
+      if (chunk.length >= minToolCalls) {
+        candidates.push({
+          session_id: sessionId,
+          tool_calls: chunk,
+          start_ts: chunk[0].created_at,
+          end_ts: chunk[chunk.length - 1].created_at,
+          duration_minutes: Math.round((chunk[chunk.length - 1].created_at - chunk[0].created_at) / 60),
+        })
+      }
+    }
+  }
+
+  return candidates
+}
+
+export function pruneToolCallLog(olderThanSecs = 86400): void {
+  const cutoff = Math.floor(Date.now() / 1000) - olderThanSecs
+  db.prepare('DELETE FROM tool_call_log WHERE created_at < ?').run(cutoff)
+}
+
+export interface WorkflowBranchStat {
+  runs: number
+  successes: number
+}
+
+export interface WorkflowRecordingRow {
+  id: string
+  name: string
+  description: string | null
+  trigger_keywords: string
+  trigger_description: string | null
+  embedding: string | null
+  steps_json: string
+  branch_stats_json: string
+  run_count: number
+  success_count: number
+  agent_id: string
+  created_at: number
+  updated_at: number
+}
+
+export function listWorkflowRecordings(agent_id?: string): WorkflowRecordingRow[] {
+  if (agent_id) {
+    return db.prepare('SELECT * FROM workflow_recordings WHERE agent_id = ? ORDER BY updated_at DESC').all(agent_id) as WorkflowRecordingRow[]
+  }
+  return db.prepare('SELECT * FROM workflow_recordings ORDER BY updated_at DESC').all() as WorkflowRecordingRow[]
+}
+
+export function createWorkflowRecording(rec: Omit<WorkflowRecordingRow, 'created_at' | 'updated_at' | 'run_count' | 'success_count'>): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(
+    `INSERT INTO workflow_recordings (id, name, description, trigger_keywords, trigger_description, embedding, steps_json, run_count, success_count, agent_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 0, 0, ?, ?, ?)`
+  ).run(rec.id, rec.name, rec.description ?? null, rec.trigger_keywords, rec.trigger_description ?? null, rec.steps_json, rec.agent_id, now, now)
+  // Fire-and-forget: generate embedding for the trigger_description
+  if (rec.trigger_description) {
+    generateEmbedding(rec.trigger_description).then(emb => {
+      if (emb) db.prepare('UPDATE workflow_recordings SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), rec.id)
+    }).catch(() => { /* Ollama not running */ })
+  }
+}
+
+export function updateWorkflowRecording(id: string, patch: Partial<Pick<WorkflowRecordingRow, 'name' | 'description' | 'trigger_keywords' | 'trigger_description' | 'steps_json' | 'run_count' | 'success_count'>>): boolean {
+  const now = Math.floor(Date.now() / 1000)
+  const sets: string[] = ['updated_at = ?']
+  const params: unknown[] = [now]
+  if (patch.name !== undefined) { sets.push('name = ?'); params.push(patch.name) }
+  if (patch.description !== undefined) { sets.push('description = ?'); params.push(patch.description) }
+  if (patch.trigger_keywords !== undefined) { sets.push('trigger_keywords = ?'); params.push(patch.trigger_keywords) }
+  if (patch.trigger_description !== undefined) {
+    sets.push('trigger_description = ?'); params.push(patch.trigger_description)
+    // Regenerate embedding when trigger_description changes
+    if (patch.trigger_description) {
+      generateEmbedding(patch.trigger_description).then(emb => {
+        if (emb) db.prepare('UPDATE workflow_recordings SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), id)
+      }).catch(() => { /* Ollama not running */ })
+    }
+  }
+  if (patch.steps_json !== undefined) { sets.push('steps_json = ?'); params.push(patch.steps_json) }
+  if (patch.run_count !== undefined) { sets.push('run_count = ?'); params.push(patch.run_count) }
+  if (patch.success_count !== undefined) { sets.push('success_count = ?'); params.push(patch.success_count) }
+  params.push(id)
+  return db.prepare(`UPDATE workflow_recordings SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
+}
+
+export function deleteWorkflowRecording(id: string): boolean {
+  return db.prepare('DELETE FROM workflow_recordings WHERE id = ?').run(id).changes > 0
+}
+
+export function matchWorkflowRecordings(keywords: string): WorkflowRecordingRow[] {
+  const words = keywords.toLowerCase().split(/\s+/).filter(Boolean)
+  const all = db.prepare('SELECT * FROM workflow_recordings ORDER BY success_count DESC').all() as WorkflowRecordingRow[]
+  return all.filter(r => {
+    const kw = r.trigger_keywords.toLowerCase()
+    return words.some(w => kw.includes(w))
+  })
+}
+
+export interface WorkflowMatchResult {
+  workflow: WorkflowRecordingRow
+  score: number
+  source: 'keyword' | 'vector' | 'both'
+}
+
+export async function matchWorkflowRecordingsSemantic(query: string, threshold = 0.6): Promise<WorkflowMatchResult[]> {
+  const all = db.prepare('SELECT * FROM workflow_recordings ORDER BY success_count DESC').all() as WorkflowRecordingRow[]
+
+  // Keyword match
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  const keywordMatches = new Set(all.filter(r => {
+    const kw = (r.trigger_keywords + ' ' + (r.trigger_description || '')).toLowerCase()
+    return words.some(w => kw.includes(w))
+  }).map(r => r.id))
+
+  // Vector match
+  const vectorMatches = new Map<string, number>()
+  const queryEmb = await generateEmbedding(query)
+  if (queryEmb) {
+    for (const r of all) {
+      if (!r.embedding) continue
+      try {
+        const emb = JSON.parse(r.embedding) as number[]
+        const score = cosineSimilarity(queryEmb, emb)
+        if (score >= threshold) vectorMatches.set(r.id, score)
+      } catch { /* skip */ }
+    }
+  }
+
+  const results: WorkflowMatchResult[] = []
+  const seen = new Set<string>()
+
+  for (const r of all) {
+    const inKw = keywordMatches.has(r.id)
+    const vecScore = vectorMatches.get(r.id)
+    if (!inKw && vecScore === undefined) continue
+    if (seen.has(r.id)) continue
+    seen.add(r.id)
+    results.push({
+      workflow: r,
+      score: vecScore ?? (inKw ? 1.0 : 0),
+      source: inKw && vecScore !== undefined ? 'both' : inKw ? 'keyword' : 'vector',
+    })
+  }
+
+  results.sort((a, b) => b.score - a.score)
+  return results
+}
+
+export function recordWorkflowBranchRun(id: string, branchId: string, success: boolean): boolean {
+  const rec = db.prepare('SELECT branch_stats_json FROM workflow_recordings WHERE id = ?').get(id) as { branch_stats_json: string } | undefined
+  if (!rec) return false
+  let stats: Record<string, WorkflowBranchStat> = {}
+  try { stats = JSON.parse(rec.branch_stats_json || '{}') } catch { /* use empty */ }
+  if (!stats[branchId]) stats[branchId] = { runs: 0, successes: 0 }
+  stats[branchId].runs++
+  if (success) stats[branchId].successes++
+  const now = Math.floor(Date.now() / 1000)
+  return db.prepare('UPDATE workflow_recordings SET branch_stats_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(stats), now, id).changes > 0
+}
+
+export async function backfillWorkflowEmbeddings(): Promise<number> {
+  const rows = db.prepare('SELECT id, trigger_description FROM workflow_recordings WHERE embedding IS NULL AND trigger_description IS NOT NULL').all() as { id: string; trigger_description: string }[]
+  let count = 0
+  for (const row of rows) {
+    const emb = await generateEmbedding(row.trigger_description)
+    if (emb) {
+      db.prepare('UPDATE workflow_recordings SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), row.id)
+      count++
+    }
+    await new Promise(r => setTimeout(r, 100))
+  }
+  return count
 }

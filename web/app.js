@@ -87,7 +87,11 @@ function switchPage(pageId) {
   if (pageId === 'autonomy') loadAutonomy()
   if (pageId === 'updates') loadUpdates()
   if (pageId === 'team') { loadTeamGraph(); loadTeamMessages(); populateMsgComposeTargets() }
+  if (pageId === 'console') loadConsolePage()
+  else stopConsolePolling()
   if (pageId === 'tokenUsage') loadTokenUsage()
+  if (pageId === 'ideas') loadIdeasPage()
+  if (pageId === 'workflows') loadWorkflowsPage()
 }
 
 // Mobile off-canvas sidebar toggle. No-op visual effect on desktop (the
@@ -585,25 +589,27 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
 
   try {
     if (editId) {
-      await fetch(`/api/kanban/${encodeURIComponent(editId)}`, {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(editId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.status) }
       showToast('Kártya frissítve')
     } else {
       data.status = document.getElementById('cardEditStatus').value
-      await fetch('/api/kanban', {
+      const res = await fetch('/api/kanban', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.status) }
       showToast('Kártya létrehozva')
     }
     closeModal(cardModalOverlay)
     loadKanban()
   } catch (err) {
-    showToast('Hiba a mentés során')
+    showToast(`Hiba a mentés során: ${err.message}`)
   }
 })
 
@@ -3696,12 +3702,8 @@ function renderWeekView(data) {
 }
 
 function openEditSchedule(task) {
-  // Reset expand state
-  document.getElementById('expandQuestions').hidden = true
-  document.getElementById('expandStatus').textContent = ''
-  expandAnswers = []
-
   loadScheduleAgents().then(() => {
+    resetScheduleForm()
     document.getElementById('scheduleModalTitle').textContent = 'Feladat szerkesztése'
     document.getElementById('scheduleName').value = task.name
     document.getElementById('scheduleName').disabled = true
@@ -3711,6 +3713,11 @@ function openEditSchedule(task) {
     document.getElementById('scheduleSkipIfBusy').checked = !!task.skipIfBusy
     document.getElementById('scheduleForceSend').checked = !!task.forceSend
     document.getElementById('scheduleTargetSession').value = task.targetSession || ''
+
+    // Set type (heartbeat or task; custom types fall back to task)
+    const typeEl = document.getElementById('scheduleType')
+    typeEl.value = (task.type === 'heartbeat') ? 'heartbeat' : 'task'
+    document.getElementById('heartbeatTemplateGroup').hidden = typeEl.value !== 'heartbeat'
 
     // Set agent
     const agentSel = document.getElementById('scheduleAgent')
@@ -7501,6 +7508,87 @@ document.getElementById('updatesApplyBtn').addEventListener('click', async () =>
 pollUpdatesBadge()
 setInterval(pollUpdatesBadge, 5 * 60_000)
 
+// ============================================================
+// === Agent Console ===
+// ============================================================
+
+let consoleRefreshTimer = null
+let currentConsoleSession = 'marveen-channels'
+let currentConsoleAgentId = 'marveen'
+
+function stripAnsi(str) {
+  return str.replace(/\x1b\[[0-9;]*[mGKHFJA-Za-z]/g, '')
+}
+
+async function loadConsolePage() {
+  await loadAgentConsoleList()
+  startConsolePolling()
+}
+
+async function loadAgentConsoleList() {
+  try {
+    const res = await fetch('/api/agent-console/agents')
+    if (!res.ok) return
+    const agents = await res.json()
+    const tabsDiv = document.getElementById('consoleTabs')
+    tabsDiv.innerHTML = agents.map(a =>
+      `<button class="console-tab ${a.id === currentConsoleAgentId ? 'active' : ''}"
+              data-agent="${a.id}"
+              data-session="${a.sessionName}"
+              style="padding: 8px 16px; margin: 0 4px 12px 0; background: ${a.isRunning ? '#4CAF50' : '#999'};
+                      color: white; border: none; cursor: pointer; border-radius: 4px; font-size: 13px;">
+        ${a.displayName} ${a.isRunning ? '🟢' : '🔴'}
+      </button>`
+    ).join('')
+
+    tabsDiv.querySelectorAll('.console-tab').forEach(btn => {
+      btn.addEventListener('click', e => {
+        const t = e.currentTarget
+        currentConsoleAgentId = t.dataset.agent
+        currentConsoleSession = t.dataset.session
+        tabsDiv.querySelectorAll('.console-tab').forEach(b => b.classList.remove('active'))
+        t.classList.add('active')
+        loadConsoleOutput()
+      })
+    })
+
+    await loadConsoleOutput()
+  } catch (err) {
+    console.error('Agent console list error:', err)
+  }
+}
+
+async function loadConsoleOutput() {
+  try {
+    const res = await fetch(`/api/agent-console/${encodeURIComponent(currentConsoleSession)}`)
+    if (!res.ok) {
+      document.getElementById('consoleOutput').textContent = '[error]'
+      return
+    }
+    const data = await res.json()
+
+    const outputDiv = document.getElementById('consoleOutput')
+    const statusDiv = document.getElementById('consoleStatus')
+
+    outputDiv.textContent = stripAnsi(data.output || '[no output]')
+    statusDiv.textContent = data.isRunning ? '🟢 Futó' : '🔴 Leállított'
+
+    const container = outputDiv.parentElement
+    container.scrollTop = container.scrollHeight
+  } catch (err) {
+    console.error('Agent console output error:', err)
+  }
+}
+
+function startConsolePolling() {
+  if (consoleRefreshTimer) clearInterval(consoleRefreshTimer)
+  consoleRefreshTimer = setInterval(loadConsoleOutput, 2000)
+}
+
+function stopConsolePolling() {
+  if (consoleRefreshTimer) { clearInterval(consoleRefreshTimer); consoleRefreshTimer = null }
+}
+
 // === Init ===
 populateAvatarGrid()
 loadMemAgents()
@@ -8837,6 +8925,282 @@ window.addEventListener('resize', () => {
     if (tuChartState && renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
   }
 })
+
+// ============================================================
+// Ideas (Ötletláda)
+// ============================================================
+let ideas = []
+let ideasPromoteId = null
+let ideaEditId = null
+const STATUS_COLORS = { new: 'var(--accent)', reviewed: '#f59e0b', kanban: '#22c55e', rejected: '#ef4444' }
+const STATUS_LABELS = { new: 'Új', reviewed: 'Átnézve', kanban: 'Kanbanban', rejected: 'Elutasítva' }
+
+async function loadIdeasPage() {
+  const statusFilter = document.getElementById('ideaStatusFilter')?.value || ''
+  const categoryFilter = document.getElementById('ideaCategoryFilter')?.value || ''
+  const params = new URLSearchParams()
+  if (statusFilter) params.set('status', statusFilter)
+  if (categoryFilter) params.set('category', categoryFilter)
+  const [ideasRes, catsRes] = await Promise.all([fetch('/api/ideas?' + params), fetch('/api/ideas/categories')])
+  ideas = await ideasRes.json()
+  const cats = await catsRes.json()
+  const catSel = document.getElementById('ideaCategoryFilter')
+  if (catSel) {
+    const prev = catSel.value
+    catSel.innerHTML = '<option value="">Összes kategória</option>' + cats.map(c => `<option value="${escapeHtml(c)}" ${c === prev ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')
+  }
+  renderIdeasStats()
+  renderIdeasList()
+}
+
+function renderIdeasStats() {
+  const counts = { new: 0, reviewed: 0, kanban: 0, rejected: 0 }
+  for (const i of ideas) counts[i.status] = (counts[i.status] || 0) + 1
+  const el = document.getElementById('ideasStats')
+  if (!el) return
+  el.innerHTML = Object.entries(counts).map(([s, n]) =>
+    `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:90px">
+      <div style="font-size:22px;font-weight:700;color:${STATUS_COLORS[s]}">${n}</div>
+      <div style="font-size:12px;color:var(--text-muted)">${STATUS_LABELS[s]}</div>
+    </div>`
+  ).join('')
+}
+
+function renderIdeasList() {
+  const el = document.getElementById('ideasList')
+  if (!el) return
+  if (!ideas.length) { el.innerHTML = '<div style="color:var(--text-muted);padding:32px;text-align:center">Nincs ötlet</div>'; return }
+  const byCategory = {}
+  for (const idea of ideas) {
+    if (!byCategory[idea.category]) byCategory[idea.category] = []
+    byCategory[idea.category].push(idea)
+  }
+  el.innerHTML = Object.entries(byCategory).map(([cat, items]) => `
+    <div style="margin-bottom:8px">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);padding:4px 0 6px">${escapeHtml(cat)}</div>
+      ${items.map(renderIdeaCard).join('')}
+    </div>`).join('')
+}
+
+function renderIdeaCard(idea) {
+  const statusColor = STATUS_COLORS[idea.status] || 'var(--text-muted)'
+  const statusLabel = STATUS_LABELS[idea.status] || idea.status
+  const desc = idea.description ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(idea.description)}</div>` : ''
+  return `<div class="card" style="padding:12px 16px;margin-bottom:4px">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+      <div style="flex:1">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-weight:600;font-size:14px">${escapeHtml(idea.title)}</span>
+          <span style="font-size:11px;color:${statusColor};padding:2px 6px;border:1px solid ${statusColor};border-radius:4px">${statusLabel}</span>
+        </div>
+        ${desc}
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0">
+        <button class="btn-secondary btn-compact" onclick="openIdeaEdit('${idea.id}')" style="font-size:11px">Szerkeszt</button>
+        <button class="btn-primary btn-compact" onclick="openIdeaPromote('${idea.id}')" style="font-size:11px">Kanban</button>
+        <button class="btn-secondary btn-compact" onclick="deleteIdeaItem('${idea.id}')" style="font-size:11px;color:#ef4444">Töröl</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function openIdeaNew() {
+  ideaEditId = null
+  document.getElementById('ideaModalTitle').textContent = 'Új ötlet'
+  document.getElementById('ideaTitleInput').value = ''
+  document.getElementById('ideaDescInput').value = ''
+  document.getElementById('ideaModalOverlay').hidden = false
+}
+
+function openIdeaEdit(id) {
+  const idea = ideas.find(i => i.id === id)
+  if (!idea) return
+  ideaEditId = id
+  document.getElementById('ideaModalTitle').textContent = 'Ötlet szerkesztése'
+  document.getElementById('ideaTitleInput').value = idea.title
+  document.getElementById('ideaDescInput').value = idea.description || ''
+  document.getElementById('ideaCategoryInput').value = idea.category
+  document.getElementById('ideaModalOverlay').hidden = false
+}
+
+async function saveIdea() {
+  const title = document.getElementById('ideaTitleInput').value.trim()
+  if (!title) { showToast('Cím kötelező', 'error'); return }
+  const body = { title, description: document.getElementById('ideaDescInput').value.trim() || undefined, category: document.getElementById('ideaCategoryInput').value, source: 'manual' }
+  if (ideaEditId) {
+    await fetch(`/api/ideas/${ideaEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  } else {
+    await fetch('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, status: 'new' }) })
+  }
+  document.getElementById('ideaModalOverlay').hidden = true
+  loadIdeasPage()
+}
+
+async function deleteIdeaItem(id) {
+  if (!confirm('Biztosan törlöd?')) return
+  await fetch(`/api/ideas/${id}`, { method: 'DELETE' })
+  loadIdeasPage()
+}
+
+function openIdeaPromote(id) {
+  ideasPromoteId = id
+  document.getElementById('ideaPromoteOverlay').hidden = false
+}
+
+async function promoteIdea(phase) {
+  if (!ideasPromoteId) return
+  const res = await fetch(`/api/ideas/${ideasPromoteId}/promote`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase }) })
+  const data = await res.json()
+  ideasPromoteId = null
+  document.getElementById('ideaPromoteOverlay').hidden = true
+  if (data.ok) showToast(`Kanban kártya létrehozva: ${data.kanban_id}`)
+  loadIdeasPage()
+}
+
+document.getElementById('ideaNewBtn')?.addEventListener('click', openIdeaNew)
+document.getElementById('ideaModalClose')?.addEventListener('click', () => { document.getElementById('ideaModalOverlay').hidden = true })
+document.getElementById('ideaModalCancel')?.addEventListener('click', () => { document.getElementById('ideaModalOverlay').hidden = true })
+document.getElementById('ideaModalSave')?.addEventListener('click', saveIdea)
+document.getElementById('ideaPromoteClose')?.addEventListener('click', () => { document.getElementById('ideaPromoteOverlay').hidden = true })
+document.getElementById('ideaPromoteCancel')?.addEventListener('click', () => { document.getElementById('ideaPromoteOverlay').hidden = true })
+document.getElementById('ideaPromoteDetail')?.addEventListener('click', () => promoteIdea('detail'))
+document.getElementById('ideaPromotePlan')?.addEventListener('click', () => promoteIdea('plan'))
+document.getElementById('ideaStatusFilter')?.addEventListener('change', loadIdeasPage)
+document.getElementById('ideaCategoryFilter')?.addEventListener('change', loadIdeasPage)
+
+// ============================================================
+// Workflow Recordings
+// ============================================================
+let workflows = []
+let workflowEditId = null
+
+async function loadWorkflowsPage() {
+  const q = document.getElementById('workflowSearchInput')?.value?.trim() || ''
+  const url = q ? `/api/workflow-recordings?q=${encodeURIComponent(q)}` : '/api/workflow-recordings'
+  const res = await fetch(url)
+  workflows = await res.json()
+  renderWorkflowStats()
+  renderWorkflowList()
+}
+
+function renderWorkflowStats() {
+  const el = document.getElementById('workflowStats')
+  if (!el) return
+  const total = workflows.length
+  const totalRuns = workflows.reduce((s, w) => s + (w.run_count || 0), 0)
+  const totalSuccess = workflows.reduce((s, w) => s + (w.success_count || 0), 0)
+  const rate = totalRuns > 0 ? Math.round(totalSuccess / totalRuns * 100) : 0
+  el.innerHTML = [
+    { label: 'Workflow', value: total, color: 'var(--accent)' },
+    { label: 'Futtatás', value: totalRuns, color: 'var(--text)' },
+    { label: 'Sikerráta', value: totalRuns > 0 ? rate + '%' : '–', color: rate >= 80 ? '#22c55e' : '#f59e0b' },
+  ].map(s => `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:90px">
+    <div style="font-size:22px;font-weight:700;color:${s.color}">${s.value}</div>
+    <div style="font-size:12px;color:var(--text-muted)">${s.label}</div>
+  </div>`).join('')
+}
+
+function renderWorkflowList() {
+  const el = document.getElementById('workflowList')
+  if (!el) return
+  if (!workflows.length) { el.innerHTML = '<div style="color:var(--text-muted);padding:32px;text-align:center">Nincs elmentett workflow</div>'; return }
+  el.innerHTML = workflows.map(w => {
+    const steps = (() => { try { return JSON.parse(w.steps_json) } catch { return [] } })()
+    const rate = w.run_count > 0 ? Math.round(w.success_count / w.run_count * 100) : null
+    const rateHtml = rate !== null ? `<span style="font-size:11px;color:${rate >= 80 ? '#22c55e' : '#f59e0b'}">${rate}% siker (${w.run_count}x)</span>` : `<span style="font-size:11px;color:var(--text-muted)">Még nem futott</span>`
+    const branchStats = (() => { try { return JSON.parse(w.branch_stats_json || '{}') } catch { return {} } })()
+    const branchStatsHtml = Object.keys(branchStats).length ? `
+      <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+        ${Object.entries(branchStats).map(([bId, bs]) => {
+          const br = bs
+          const bRate = br.runs > 0 ? Math.round(br.successes / br.runs * 100) : 0
+          const bColor = bRate >= 80 ? '#22c55e' : '#f59e0b'
+          return `<span style="font-size:10px;background:var(--surface-2,var(--surface));border:1px solid var(--border);border-radius:4px;padding:2px 6px">
+            <span style="color:var(--text-muted)">${escapeHtml(bId)}:</span> <span style="color:${bColor}">${bRate}%</span> <span style="color:var(--text-muted)">(${br.successes}/${br.runs})</span>
+          </span>`
+        }).join('')}
+      </div>` : ''
+    const kw = w.trigger_keywords ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">Triggerek: ${escapeHtml(w.trigger_keywords)}</div>` : ''
+    const stepTypeColor = { command: 'var(--accent)', decision: '#f59e0b', recovery: '#ef4444' }
+    const stepTypeLabel = { command: '⚙', decision: '⤷', recovery: '↺' }
+    const stepsHtml = steps.length ? `<div style="margin-top:8px;display:flex;flex-direction:column;gap:3px">${steps.map((s, i) => {
+      const typeColor = stepTypeColor[s.type] || 'var(--accent)'
+      const typeIcon = stepTypeLabel[s.type] || ''
+      const onFail = s.on_failure ? `<span style="font-size:10px;color:#ef4444;margin-left:4px">→ ${escapeHtml(s.on_failure)}</span>` : ''
+      const branches = s.branches ? `<div style="font-size:10px;color:var(--text-muted);margin-left:22px">${Object.entries(s.branches).map(([k, v]) => `${escapeHtml(k)}: [${v.join(', ')}]`).join(' | ')}</div>` : ''
+      return `<div style="font-size:12px;color:var(--text-muted);display:flex;gap:6px;flex-wrap:wrap">
+        <span style="opacity:.4;min-width:16px">${s.id || (i + 1) + '.'}</span>
+        <span><strong style="font-size:11px;color:${typeColor}">${typeIcon}${escapeHtml(s.tool || s.action || '')}</strong> — ${escapeHtml(s.description || s.action || '')}${onFail}</span>
+      </div>${branches}`
+    }).join('')}</div>` : ''
+    return `<div class="card" style="padding:14px 16px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-weight:600;font-size:14px">${escapeHtml(w.name)}</span>${rateHtml}
+          </div>
+          ${w.description ? `<div style="font-size:13px;color:var(--text-muted);margin-top:2px">${escapeHtml(w.description)}</div>` : ''}
+          ${kw}${branchStatsHtml}${stepsHtml}
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="btn-secondary btn-compact" onclick="openWorkflowEdit('${w.id}')" style="font-size:12px">Szerkeszt</button>
+          <button class="btn-secondary btn-compact" onclick="deleteWorkflow('${w.id}')" style="font-size:12px;color:#ef4444">Töröl</button>
+        </div>
+      </div>
+    </div>`
+  }).join('')
+}
+
+function openWorkflowNew() {
+  workflowEditId = null
+  document.getElementById('workflowModalTitle').textContent = 'Új workflow'
+  document.getElementById('workflowNameInput').value = ''
+  document.getElementById('workflowDescInput').value = ''
+  document.getElementById('workflowKeywordsInput').value = ''
+  document.getElementById('workflowTriggerDescInput').value = ''
+  document.getElementById('workflowStepsInput').value = '[]'
+  document.getElementById('workflowModalOverlay').hidden = false
+}
+
+function openWorkflowEdit(id) {
+  const w = workflows.find(x => x.id === id)
+  if (!w) return
+  workflowEditId = id
+  document.getElementById('workflowModalTitle').textContent = 'Workflow szerkesztése'
+  document.getElementById('workflowNameInput').value = w.name
+  document.getElementById('workflowDescInput').value = w.description || ''
+  document.getElementById('workflowKeywordsInput').value = w.trigger_keywords || ''
+  document.getElementById('workflowTriggerDescInput').value = w.trigger_description || ''
+  document.getElementById('workflowStepsInput').value = w.steps_json || '[]'
+  document.getElementById('workflowModalOverlay').hidden = false
+}
+
+async function saveWorkflow() {
+  const name = document.getElementById('workflowNameInput').value.trim()
+  if (!name) { showToast('Név kötelező', 'error'); return }
+  let steps
+  try { steps = JSON.parse(document.getElementById('workflowStepsInput').value) } catch { showToast('Érvénytelen JSON', 'error'); return }
+  const body = { name, description: document.getElementById('workflowDescInput').value.trim() || undefined, trigger_keywords: document.getElementById('workflowKeywordsInput').value.trim(), trigger_description: document.getElementById('workflowTriggerDescInput').value.trim() || undefined, steps }
+  if (workflowEditId) {
+    await fetch(`/api/workflow-recordings/${workflowEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  } else {
+    await fetch('/api/workflow-recordings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  }
+  document.getElementById('workflowModalOverlay').hidden = true
+  loadWorkflowsPage()
+}
+
+async function deleteWorkflow(id) {
+  if (!confirm('Biztosan törlöd?')) return
+  await fetch(`/api/workflow-recordings/${id}`, { method: 'DELETE' })
+  loadWorkflowsPage()
+}
+
+document.getElementById('workflowNewBtn')?.addEventListener('click', openWorkflowNew)
+document.getElementById('workflowModalClose')?.addEventListener('click', () => { document.getElementById('workflowModalOverlay').hidden = true })
+document.getElementById('workflowModalCancel')?.addEventListener('click', () => { document.getElementById('workflowModalOverlay').hidden = true })
+document.getElementById('workflowModalSave')?.addEventListener('click', saveWorkflow)
+document.getElementById('workflowSearchInput')?.addEventListener('input', () => loadWorkflowsPage())
 
 ;(() => {
   const p = new URLSearchParams(window.location.search).get('page')
