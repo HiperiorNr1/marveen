@@ -8926,7 +8926,7 @@ function openIdeaNew() {
   document.getElementById('ideaModalTitle').textContent = 'Új ötlet'
   document.getElementById('ideaTitleInput').value = ''
   document.getElementById('ideaDescInput').value = ''
-  document.getElementById('ideaModalOverlay').hidden = false
+  openModal(document.getElementById('ideaModalOverlay'))
 }
 
 function openIdeaEdit(id) {
@@ -8937,7 +8937,7 @@ function openIdeaEdit(id) {
   document.getElementById('ideaTitleInput').value = idea.title
   document.getElementById('ideaDescInput').value = idea.description || ''
   document.getElementById('ideaCategoryInput').value = idea.category
-  document.getElementById('ideaModalOverlay').hidden = false
+  openModal(document.getElementById('ideaModalOverlay'))
 }
 
 async function saveIdea() {
@@ -8949,7 +8949,7 @@ async function saveIdea() {
   } else {
     await fetch('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, status: 'new' }) })
   }
-  document.getElementById('ideaModalOverlay').hidden = true
+  closeModal(document.getElementById('ideaModalOverlay'))
   loadIdeasPage()
 }
 
@@ -8961,7 +8961,7 @@ async function deleteIdeaItem(id) {
 
 function openIdeaPromote(id) {
   ideasPromoteId = id
-  document.getElementById('ideaPromoteOverlay').hidden = false
+  openModal(document.getElementById('ideaPromoteOverlay'))
 }
 
 async function promoteIdea(phase) {
@@ -8969,17 +8969,17 @@ async function promoteIdea(phase) {
   const res = await fetch(`/api/ideas/${ideasPromoteId}/promote`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase }) })
   const data = await res.json()
   ideasPromoteId = null
-  document.getElementById('ideaPromoteOverlay').hidden = true
+  closeModal(document.getElementById('ideaPromoteOverlay'))
   if (data.ok) showToast(`Kanban kártya létrehozva: ${data.kanban_id}`)
   loadIdeasPage()
 }
 
 document.getElementById('ideaNewBtn')?.addEventListener('click', openIdeaNew)
-document.getElementById('ideaModalClose')?.addEventListener('click', () => { document.getElementById('ideaModalOverlay').hidden = true })
-document.getElementById('ideaModalCancel')?.addEventListener('click', () => { document.getElementById('ideaModalOverlay').hidden = true })
+document.getElementById('ideaModalClose')?.addEventListener('click', () => { closeModal(document.getElementById('ideaModalOverlay')) })
+document.getElementById('ideaModalCancel')?.addEventListener('click', () => { closeModal(document.getElementById('ideaModalOverlay')) })
 document.getElementById('ideaModalSave')?.addEventListener('click', saveIdea)
-document.getElementById('ideaPromoteClose')?.addEventListener('click', () => { document.getElementById('ideaPromoteOverlay').hidden = true })
-document.getElementById('ideaPromoteCancel')?.addEventListener('click', () => { document.getElementById('ideaPromoteOverlay').hidden = true })
+document.getElementById('ideaPromoteClose')?.addEventListener('click', () => { closeModal(document.getElementById('ideaPromoteOverlay')) })
+document.getElementById('ideaPromoteCancel')?.addEventListener('click', () => { closeModal(document.getElementById('ideaPromoteOverlay')) })
 document.getElementById('ideaPromoteDetail')?.addEventListener('click', () => promoteIdea('detail'))
 document.getElementById('ideaPromotePlan')?.addEventListener('click', () => promoteIdea('plan'))
 document.getElementById('ideaStatusFilter')?.addEventListener('change', loadIdeasPage)
@@ -9076,7 +9076,7 @@ function openWorkflowNew() {
   document.getElementById('workflowKeywordsInput').value = ''
   document.getElementById('workflowTriggerDescInput').value = ''
   document.getElementById('workflowStepsInput').value = '[]'
-  document.getElementById('workflowModalOverlay').hidden = false
+  openModal(document.getElementById('workflowModalOverlay'))
 }
 
 function openWorkflowEdit(id) {
@@ -9089,7 +9089,7 @@ function openWorkflowEdit(id) {
   document.getElementById('workflowKeywordsInput').value = w.trigger_keywords || ''
   document.getElementById('workflowTriggerDescInput').value = w.trigger_description || ''
   document.getElementById('workflowStepsInput').value = w.steps_json || '[]'
-  document.getElementById('workflowModalOverlay').hidden = false
+  openModal(document.getElementById('workflowModalOverlay'))
 }
 
 async function saveWorkflow() {
@@ -9103,7 +9103,7 @@ async function saveWorkflow() {
   } else {
     await fetch('/api/workflow-recordings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   }
-  document.getElementById('workflowModalOverlay').hidden = true
+  closeModal(document.getElementById('workflowModalOverlay'))
   loadWorkflowsPage()
 }
 
@@ -9114,8 +9114,8 @@ async function deleteWorkflow(id) {
 }
 
 document.getElementById('workflowNewBtn')?.addEventListener('click', openWorkflowNew)
-document.getElementById('workflowModalClose')?.addEventListener('click', () => { document.getElementById('workflowModalOverlay').hidden = true })
-document.getElementById('workflowModalCancel')?.addEventListener('click', () => { document.getElementById('workflowModalOverlay').hidden = true })
+document.getElementById('workflowModalClose')?.addEventListener('click', () => { closeModal(document.getElementById('workflowModalOverlay')) })
+document.getElementById('workflowModalCancel')?.addEventListener('click', () => { closeModal(document.getElementById('workflowModalOverlay')) })
 document.getElementById('workflowModalSave')?.addEventListener('click', saveWorkflow)
 document.getElementById('workflowSearchInput')?.addEventListener('input', () => loadWorkflowsPage())
 
