@@ -204,6 +204,9 @@ const cardDetailOverlay = document.getElementById('cardDetailOverlay')
 const breakdownOverlay = document.getElementById('breakdownOverlay')
 let breakdownCardId = null
 let breakdownSubtasks = []
+// Breakdown modal is shared between kanban-card breakdown and idea promote.
+let breakdownMode = 'kanban' // 'kanban' | 'idea'
+let breakdownIdeaId = null
 const columns = document.querySelectorAll('.kanban-col-body')
 
 // Modal wiring
@@ -841,6 +844,7 @@ async function showCardDetail(card) {
       const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/breakdown`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) { showToast(data.error || 'Hiba'); btn.disabled = false; btn.textContent = 'Breakdown'; return }
+      breakdownMode = 'kanban'
       breakdownCardId = card.id
       breakdownSubtasks = data.subtasks
       showBreakdownModal(data.subtasks, card)
@@ -862,6 +866,7 @@ async function triggerBreakdown(card) {
     const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/breakdown`, { method: 'POST' })
     const data = await res.json()
     if (!res.ok) { showToast(data.error || 'Breakdown hiba'); return }
+    breakdownMode = 'kanban'
     breakdownCardId = card.id
     breakdownSubtasks = data.subtasks
     showBreakdownModal(data.subtasks, card)
@@ -922,10 +927,24 @@ document.getElementById('breakdownAcceptBtn').addEventListener('click', async ()
     const title = item.querySelector('.breakdown-title-input')?.value.trim() || breakdownSubtasks[idx]?.title
     const assignee = item.querySelector('.breakdown-assignee-select')?.value || breakdownSubtasks[idx]?.assignee
     const priority = breakdownSubtasks[idx]?.priority || 'normal'
-    accepted.push({ title, assignee, priority })
+    const description = breakdownSubtasks[idx]?.description || ''
+    accepted.push({ title, assignee, priority, description })
   })
-  if (accepted.length === 0) { showToast('Válassz legalább egy subtask-ot'); return }
+  if (accepted.length === 0) { showToast('Válassz legalább egy alfeladatot'); return }
   try {
+    if (breakdownMode === 'idea') {
+      const res = await fetch(`/api/ideas/${encodeURIComponent(breakdownIdeaId)}/promote-breakdown`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subtasks: accepted }),
+      })
+      const data = await res.json()
+      if (!res.ok) { showToast(data.error || 'Hiba'); return }
+      closeModal(breakdownOverlay)
+      showToast(`Kanbanra emelve: ${data.child_count} alfeladat + szülő kártya`)
+      loadIdeasPage()
+      return
+    }
     const res = await fetch(`/api/kanban/${encodeURIComponent(breakdownCardId)}/breakdown/accept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -8915,9 +8934,12 @@ function renderIdeaCard(idea) {
         </div>
         ${desc}
       </div>
-      <div style="display:flex;gap:4px;flex-shrink:0">
+      <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+        ${idea.status !== 'reviewed' && idea.status !== 'kanban' ? `<button class="btn-secondary btn-compact" onclick="setIdeaStatus('${idea.id}','reviewed')" style="font-size:11px">Átnézve</button>` : ''}
+        ${idea.status !== 'rejected' ? `<button class="btn-secondary btn-compact" onclick="setIdeaStatus('${idea.id}','rejected')" style="font-size:11px;color:#ef4444">Elutasít</button>` : ''}
+        ${idea.status === 'reviewed' || idea.status === 'rejected' ? `<button class="btn-secondary btn-compact" onclick="setIdeaStatus('${idea.id}','new')" style="font-size:11px">Újra</button>` : ''}
         <button class="btn-secondary btn-compact" onclick="openIdeaEdit('${idea.id}')" style="font-size:11px">Szerkeszt</button>
-        <button class="btn-primary btn-compact" onclick="openIdeaPromote('${idea.id}')" style="font-size:11px">Kanban</button>
+        ${idea.status !== 'kanban' && idea.status !== 'rejected' ? `<button class="btn-primary btn-compact" onclick="openIdeaBreakdown('${idea.id}')" style="font-size:11px">Kanbanra (AI)</button>` : ''}
         <button class="btn-secondary btn-compact" onclick="deleteIdeaItem('${idea.id}')" style="font-size:11px;color:#ef4444">Töröl</button>
       </div>
     </div>
@@ -8975,6 +8997,40 @@ async function promoteIdea(phase) {
   closeModal(document.getElementById('ideaPromoteOverlay'))
   if (data.ok) showToast(`Kanban kártya létrehozva: ${data.kanban_id}`)
   loadIdeasPage()
+}
+
+async function setIdeaStatus(id, status) {
+  try {
+    const res = await fetch(`/api/ideas/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) })
+    if (!res.ok) { showToast('Státusz mentés hiba'); return }
+    loadIdeasPage()
+  } catch { showToast('Státusz mentés hiba') }
+}
+
+// Promote an idea to the board via AI breakdown + per-subtask approval.
+// Reuses the shared breakdown modal (breakdownMode='idea').
+async function openIdeaBreakdown(id) {
+  const idea = ideas.find(i => i.id === id)
+  if (!idea) return
+  // The breakdown modal's assignee dropdown reads kanbanAssignees, which is only
+  // populated by loadKanban(). If the user lands here without visiting the board,
+  // fetch it so the AI-suggested assignees are selectable.
+  if (!kanbanAssignees.length) {
+    try { kanbanAssignees = await (await fetch('/api/kanban/assignees')).json() } catch { /* dropdown falls back to "nincs" */ }
+  }
+  showToast('AI kidolgozza az ötletet...')
+  try {
+    const res = await fetch(`/api/ideas/${id}/breakdown`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+    const data = await res.json()
+    if (!res.ok) { showToast(data.error || 'Breakdown hiba'); return }
+    if (!data.subtasks || !data.subtasks.length) { showToast('Az AI nem adott vissza alfeladatot'); return }
+    breakdownMode = 'idea'
+    breakdownIdeaId = id
+    breakdownSubtasks = data.subtasks
+    showBreakdownModal(data.subtasks, { title: idea.title })
+  } catch {
+    showToast('Breakdown hiba')
+  }
 }
 
 document.getElementById('ideaNewBtn')?.addEventListener('click', openIdeaNew)
