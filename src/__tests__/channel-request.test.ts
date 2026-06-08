@@ -9,8 +9,9 @@ import {
 } from '../db.js'
 
 beforeAll(() => {
+  // In-memory DB so the test never writes to the real store/claudeclaw.db.
   process.env.NODE_ENV = 'test'
-  initDatabase()
+  initDatabase(':memory:')
 })
 
 beforeEach(() => {

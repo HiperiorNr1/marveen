@@ -25,9 +25,11 @@ import {
 import { STORE_DIR, DB_FILENAME } from '../config.js'
 
 beforeAll(() => {
-  // Teszt adatbázis inicializálás
+  // Teszt adatbázis inicializálás -- in-memory, hogy a teszt SOHA ne irjon a
+  // valodi store/claudeclaw.db-be (kulonben a sessions/memories/pending-task
+  // insertek -- pl. "Szeretem a kavet" -- prod junk-memoriakent landolnak).
   process.env.NODE_ENV = 'test'
-  initDatabase()
+  initDatabase(':memory:')
 })
 
 describe('sessions', () => {

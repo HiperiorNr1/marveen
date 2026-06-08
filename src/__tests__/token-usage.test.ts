@@ -54,8 +54,10 @@ function makeToolCallLine(toolName: string, ts: string): string {
 }
 
 beforeAll(() => {
+  // In-memory DB so the test never writes to the real store/claudeclaw.db
+  // (previously test rows leaked into the live token_usage table).
   process.env.NODE_ENV = 'test'
-  initDatabase()
+  initDatabase(':memory:')
 
   // Clean previous test data
   const db = getDb()
