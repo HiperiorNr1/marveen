@@ -65,6 +65,28 @@ describe("channel-monitor: self-healing vanished main session", () => {
     expect(fn).toContain("writeRespawnStamp()")
   })
 
+  it("resumeMarveenSession writes the shared respawn stamp (2026-06-08 self-defer fix)", () => {
+    // Without this stamp the stuck-tool-call-watcher cannot defer its own
+    // self-respawn during the post-respawn grace, because lastMainRespawnAt()
+    // only sees the keepalive and launchctl timestamps -- not a stage-3 /
+    // watcher-triggered resume. The 2026-06-08 false-positive loop respawned
+    // the session 13 times in 8h because every fresh respawn left a residual
+    // TUI footer the watcher then re-classified as a wedge.
+    const start = src.indexOf("export function resumeMarveenSession")
+    expect(start, "resumeMarveenSession not found").toBeGreaterThan(0)
+    // Slice generously to the next top-level export so the assertion catches
+    // a stamp call anywhere inside the function, not just before the next "\n}\n".
+    const end = src.indexOf("\nexport ", start + 1)
+    const fn = end > start ? src.slice(start, end) : src.slice(start)
+    expect(fn).toContain("writeRespawnStamp()")
+    // It must appear before the successful return so a failed respawn does
+    // not falsely suppress later recovery paths.
+    const stampIdx = fn.indexOf("writeRespawnStamp()")
+    const returnTrueIdx = fn.indexOf("return true")
+    expect(stampIdx, "writeRespawnStamp must precede the success return").toBeGreaterThan(0)
+    expect(stampIdx).toBeLessThan(returnTrueIdx)
+  })
+
   it("CHANNELS_SCRIPT resolves to scripts/channels.sh under PROJECT_ROOT", () => {
     expect(src).toMatch(/const\s+CHANNELS_SCRIPT\s*=\s*join\(PROJECT_ROOT,\s*["']scripts["'],\s*["']channels\.sh["']\)/)
   })

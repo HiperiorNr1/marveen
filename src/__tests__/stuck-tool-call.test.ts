@@ -14,11 +14,13 @@ import { shouldDeferForRecentRespawn, confirmsWedgeProfile } from '../web/stuck-
 const THRESHOLDS: StuckToolCallThresholds = {
   freezeSeconds: 180,
   stagnantPolls: 2,
+  minPeakSeconds: 20,
 }
 
 const NO_STATE: StuckToolCallState = {
   tag: null,
   spellStartSeconds: null,
+  spellPeakSeconds: null,
   firstSeenAt: null,
   lastSeconds: null,
   stagnantPolls: 0,
@@ -68,7 +70,7 @@ describe('decideStuckToolCallRecovery', () => {
 
   it('null pane ends any spell', () => {
     const prev: StuckToolCallState = {
-      tag: 'worked', spellStartSeconds: 30, firstSeenAt: 1, lastSeconds: 31,
+      tag: 'worked', spellStartSeconds: 30, spellPeakSeconds: 31, firstSeenAt: 1, lastSeconds: 31,
       stagnantPolls: 2, stagnantSince: 1, attempts: 0,
     }
     const r = decideStuckToolCallRecovery(null, prev, 1_000_000, THRESHOLDS)
@@ -78,7 +80,7 @@ describe('decideStuckToolCallRecovery', () => {
 
   it('tag change resets the spell (verb change = real progress)', () => {
     const prev: StuckToolCallState = {
-      tag: 'brewed', spellStartSeconds: 30, firstSeenAt: 1, lastSeconds: 200,
+      tag: 'brewed', spellStartSeconds: 30, spellPeakSeconds: 200, firstSeenAt: 1, lastSeconds: 200,
       stagnantPolls: 2, stagnantSince: 1, attempts: 0,
     }
     const r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 5 }, prev, 1_000_000, THRESHOLDS)
@@ -91,7 +93,7 @@ describe('decideStuckToolCallRecovery', () => {
 
   it('counter increment resets stagnantPolls AND stagnantSince (real tool-call progress)', () => {
     const prev: StuckToolCallState = {
-      tag: 'worked', spellStartSeconds: 30, firstSeenAt: 1, lastSeconds: 195,
+      tag: 'worked', spellStartSeconds: 30, spellPeakSeconds: 195, firstSeenAt: 1, lastSeconds: 195,
       stagnantPolls: 1, stagnantSince: 1_000_000, attempts: 0,
     }
     const r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 220 }, prev, 1_030_000, THRESHOLDS)
@@ -103,7 +105,7 @@ describe('decideStuckToolCallRecovery', () => {
 
   it('first stagnant poll stamps stagnantSince but does NOT recover (anti-fluke gate)', () => {
     const prev: StuckToolCallState = {
-      tag: 'worked', spellStartSeconds: 30, firstSeenAt: 1_000_000, lastSeconds: 31,
+      tag: 'worked', spellStartSeconds: 30, spellPeakSeconds: 31, firstSeenAt: 1_000_000, lastSeconds: 31,
       stagnantPolls: 0, stagnantSince: null, attempts: 0,
     }
     const r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 31 }, prev, 1_030_000, THRESHOLDS)
@@ -151,7 +153,7 @@ describe('decideStuckToolCallRecovery', () => {
 
   it('one-shot: once recovered, hold even if still stagnant (next sweep reads fresh pane)', () => {
     const prev: StuckToolCallState = {
-      tag: 'worked', spellStartSeconds: 30, firstSeenAt: 1_000_000, lastSeconds: 31,
+      tag: 'worked', spellStartSeconds: 30, spellPeakSeconds: 31, firstSeenAt: 1_000_000, lastSeconds: 31,
       stagnantPolls: 8, stagnantSince: 1_000_000, attempts: 1,
     }
     const r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 31 }, prev, 2_000_000, THRESHOLDS)
@@ -161,7 +163,7 @@ describe('decideStuckToolCallRecovery', () => {
 
   it('clock skew backwards: restart spell rather than stall', () => {
     const prev: StuckToolCallState = {
-      tag: 'worked', spellStartSeconds: 30, firstSeenAt: 2_000_000, lastSeconds: 31,
+      tag: 'worked', spellStartSeconds: 30, spellPeakSeconds: 31, firstSeenAt: 2_000_000, lastSeconds: 31,
       stagnantPolls: 1, stagnantSince: 2_000_000, attempts: 0,
     }
     const r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 31 }, prev, 1_500_000, THRESHOLDS)
@@ -195,7 +197,7 @@ describe('decideStuckToolCallRecovery', () => {
     // 199 < 200 is an unhealthy regression. We treat it as stagnant. Two
     // polls of 199, plus enough wall-clock to clear freezeSeconds, recovers.
     const prev: StuckToolCallState = {
-      tag: 'worked', spellStartSeconds: 30, firstSeenAt: 1_000_000, lastSeconds: 200,
+      tag: 'worked', spellStartSeconds: 30, spellPeakSeconds: 200, firstSeenAt: 1_000_000, lastSeconds: 200,
       stagnantPolls: 0, stagnantSince: null, attempts: 0,
     }
     // First stagnant poll just stamps the wall-clock start.
@@ -204,6 +206,83 @@ describe('decideStuckToolCallRecovery', () => {
     // ~3 min later, still 199 (or any value <= 200): wall-clock hit.
     r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 199 }, r.next, 1_030_000 + 180_000, THRESHOLDS)
     expect(r.recover).toBe(true)
+  })
+
+  // Spell-peak discriminator (2026-06-08 fix): a residual TUI footer left over
+  // after a prior respawn sits at 3-4s forever -- the counter never advances
+  // because the new claude is not running that tool-call, the TUI just kept the
+  // stale string. Before the fix this looked exactly like a wedge (counter
+  // never increments) and triggered 13 self-respawns in 8h. The discriminator:
+  // a real wedge climbed to a meaningful seconds value (31s in the 2026-06-02
+  // incident); a residual never does.
+  it('residual TUI counter (3-4s never climbing) does NOT recover even after full freeze window', () => {
+    const t0 = 1_000_000
+    let state: StuckToolCallState = NO_STATE
+    // Poll 1: residual sits at 4s -- this is the spell-start observation.
+    let r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 4 }, state, t0, THRESHOLDS)
+    expect(r.recover).toBe(false)
+    expect(r.next.spellPeakSeconds).toBe(4)
+    state = r.next
+    // Pile on many stagnant polls past the wall-clock freeze window.
+    // spellPeak stays at 4, well below minPeakSeconds=20, so recovery is
+    // blocked despite the wall-clock+anti-fluke gates being fully satisfied.
+    for (let dt = 30_000; dt <= 30 * 60_000; dt += 30_000) {
+      r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 4 }, state, t0 + dt, THRESHOLDS)
+      expect(r.recover).toBe(false)
+      state = r.next
+    }
+    expect(state.spellPeakSeconds).toBe(4)
+    expect(state.attempts).toBe(0)
+  })
+
+  it('residual that flickers 3 -> 4 -> 3 -> 4 still does NOT recover (peak stays at 4)', () => {
+    // Mirrors the kanban diagnosis "seconds=3-4" -- the residual jiggles
+    // by one across polls. The 3 -> 4 step is technically a counter advance
+    // (resets stagnantSince once) but the peak only climbs to 4, still well
+    // under minPeakSeconds, so the discriminator continues to block.
+    const t0 = 1_000_000
+    let state: StuckToolCallState = NO_STATE
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 3 }, state, t0, THRESHOLDS).next
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 4 }, state, t0 + 30_000, THRESHOLDS).next
+    expect(state.spellPeakSeconds).toBe(4)
+    for (let dt = 60_000; dt <= 20 * 60_000; dt += 30_000) {
+      const r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 4 }, state, t0 + dt, THRESHOLDS)
+      expect(r.recover).toBe(false)
+      state = r.next
+    }
+    expect(state.spellPeakSeconds).toBe(4)
+  })
+
+  it('counter that climbed above minPeakSeconds before freezing DOES recover (real wedge shape)', () => {
+    // 2026-06-02 incident shape: counter climbed to 31s, then the render loop
+    // wedged. spellPeak reaches 31, clears the discriminator gate, and the
+    // wall-clock + anti-fluke gates fire as before.
+    const t0 = 1_000_000
+    let state: StuckToolCallState = NO_STATE
+    // Counter climbs 5 -> 18 -> 31 across three polls.
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 5 }, state, t0, THRESHOLDS).next
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 18 }, state, t0 + 30_000, THRESHOLDS).next
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 31 }, state, t0 + 60_000, THRESHOLDS).next
+    expect(state.spellPeakSeconds).toBe(31)
+    // Then it wedges. Drive enough stagnant polls + wall-clock to clear all gates.
+    let r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 31 }, state, t0 + 90_000, THRESHOLDS)
+    expect(r.recover).toBe(false) // first stagnant poll
+    state = r.next
+    r = decideStuckToolCallRecovery({ tag: 'worked', seconds: 31 }, state, t0 + 60_000 + 30_000 + 180_000, THRESHOLDS)
+    expect(r.recover).toBe(true)
+    expect(r.next.spellPeakSeconds).toBe(31) // preserved across stagnation
+  })
+
+  it('spellPeakSeconds is preserved when counter goes stagnant after a climb', () => {
+    // Peak rises with each advance; later stagnation must not erase it.
+    const t0 = 1_000_000
+    let state: StuckToolCallState = NO_STATE
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 10 }, state, t0, THRESHOLDS).next
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 25 }, state, t0 + 30_000, THRESHOLDS).next
+    expect(state.spellPeakSeconds).toBe(25)
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 25 }, state, t0 + 60_000, THRESHOLDS).next
+    state = decideStuckToolCallRecovery({ tag: 'worked', seconds: 25 }, state, t0 + 90_000, THRESHOLDS).next
+    expect(state.spellPeakSeconds).toBe(25)
   })
 
   it('partial freeze, recovers, then re-freezes -- accumulates fresh wall-clock', () => {
@@ -252,6 +331,18 @@ describe('stuck-tool-call-watcher wiring contract', () => {
     const m = watcherSrc.match(/stagnantPolls:\s*(\d+)/)
     expect(m, 'stagnantPolls constant missing').not.toBeNull()
     expect(parseInt(m![1]!, 10)).toBeGreaterThanOrEqual(2)
+  })
+
+  it('production minPeakSeconds blocks the residual band (2026-06-08 fix)', () => {
+    // Spell-peak discriminator must sit above the residual TUI band (3-4s
+    // observed in the 2026-06-08 false-positive loop) and below the real
+    // wedge floor (31s from the 2026-06-02 incident). Anywhere in (4, 31)
+    // is safe; the production default lives at 20s.
+    const m = watcherSrc.match(/minPeakSeconds:\s*(\d+)/)
+    expect(m, 'minPeakSeconds constant missing').not.toBeNull()
+    const v = parseInt(m![1]!, 10)
+    expect(v).toBeGreaterThan(4)
+    expect(v).toBeLessThan(31)
   })
 
   it('recovers via the respawn-pane path (resumeMarveenSession), NOT the launchctl hard-restart (#248)', () => {

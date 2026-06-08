@@ -95,9 +95,16 @@ function sampleMainClaudeCpuPercent(session: string): number | null {
 //     incrementing polls means ~60s+ of wall clock without a single TUI
 //     redraw advancing the counter. A healthy long-running tool-call
 //     redraws every second.
+// minPeakSeconds (2026-06-08 fix): the spell's highest observed counter value
+// must reach >= this many seconds before recovery can fire. The 2026-06-08
+// false-positive loop respawned the session 13 times in 8h on residual TUI
+// footers (3-4s every poll, never advancing) left behind by a prior respawn.
+// The real 2026-06-02 wedge had climbed to 31s before stalling. 20s sits
+// comfortably between the residual band and the real wedge floor.
 const THRESHOLDS: StuckToolCallThresholds = {
   freezeSeconds: 180,
   stagnantPolls: 2,
+  minPeakSeconds: 20,
 }
 
 // Poll cadence. Offset 35s so the three pane-readers (channel-monitor 30s,
@@ -109,6 +116,7 @@ const INTERVAL_MS = 30_000
 const NO_STATE: StuckToolCallState = {
   tag: null,
   spellStartSeconds: null,
+  spellPeakSeconds: null,
   firstSeenAt: null,
   lastSeconds: null,
   stagnantPolls: 0,
@@ -186,6 +194,7 @@ function checkSession(label: string, session: string): void {
         session,
         tag: next.tag,
         seconds: next.lastSeconds,
+        spellPeakSeconds: next.spellPeakSeconds,
         stagnantPolls: next.stagnantPolls,
         cpuPercent,
         thresholds: THRESHOLDS,
