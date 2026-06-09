@@ -2,8 +2,7 @@
   "model": "claude-opus-4-8[1m]",
   "enabledPlugins": {
     "slack-channel@marveen-marketplace": false,
-    "telegram@claude-plugins-official": true,
-    "synology-chat@efi": true
+    "telegram@claude-plugins-official": true
   },
   "hooks": {
     "UserPromptSubmit": [
