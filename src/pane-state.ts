@@ -827,6 +827,20 @@ export interface StuckToolCallState {
    * so the residual band does not look like a wedge (2026-06-08 false-positive
    * loop: 13 self-respawns in 8h triggered by 3-4s residuals every poll). */
   spellPeakSeconds: number | null
+  /** Did the counter advance at any observation since the spell started?
+   * Monotonic: once true, stays true for the lifetime of the spell. Load-
+   * bearing for the high-counter-residual discriminator (2026-06-09 B-gap
+   * follow-up): a job that ran from 0s to 91s and completed leaves a
+   * stale TUI footer "Worked for 91s" frozen forever. The watcher's first
+   * observation in this post-work window sees seconds=91 and never sees
+   * advancement -- spellPeakSeconds=91 sails past minPeakSeconds=20 (the
+   * 2026-06-08 fix's only gate) and the session gets churned for nothing.
+   * Requiring spellCounterAdvanced=true means the spell must have shown
+   * life during OUR observation window before it qualifies as a wedge.
+   * Tradeoff: a real wedge first observed already-frozen never sets this
+   * flag, so the stuck-tool-call-watcher cannot recover it; the
+   * keepalive-staleness path (KEEPALIVE_STALE_MS=18min) is the fallback. */
+  spellCounterAdvanced: boolean
   /** When the spell was first observed (ms). */
   firstSeenAt: number | null
   /** Last observed seconds value, used to detect stagnation across polls. */
@@ -880,6 +894,7 @@ const NO_STUCK_TOOL_CALL: StuckToolCallState = {
   tag: null,
   spellStartSeconds: null,
   spellPeakSeconds: null,
+  spellCounterAdvanced: false,
   firstSeenAt: null,
   lastSeconds: null,
   stagnantPolls: 0,
@@ -916,6 +931,22 @@ export function decideStuckToolCallRecovery(
   prev: StuckToolCallState,
   now: number,
   thresholds: StuckToolCallThresholds,
+  /**
+   * Most recent wall-clock time (ms) at which the SESSION proved responsive
+   * via an external signal -- ingested inbound message, scheduled keepalive
+   * tick, or any other side-channel the caller observes. Injected by the
+   * caller (matches the `decideHasPluginAlive` injection pattern in the
+   * channel-coordinator) so the decider stays pure and unit-testable.
+   *
+   * Pass `null` when no responsiveness signal is available; the gate then
+   * relies solely on the spell-internal `spellCounterAdvanced` check, which
+   * is more conservative (skips recovery on never-advanced spells).
+   *
+   * If `lastResponsiveAt >= stagnantSince`, the session was alive AFTER the
+   * counter froze -- it is not wedged, just sitting on a stale TUI footer.
+   * Recovery is suppressed.
+   */
+  lastResponsiveAt: number | null = null,
 ): StuckToolCallDecision {
   // No tool-call line: end any spell.
   if (sig === null) {
@@ -929,6 +960,7 @@ export function decideStuckToolCallRecovery(
         tag: sig.tag,
         spellStartSeconds: sig.seconds,
         spellPeakSeconds: sig.seconds,
+        spellCounterAdvanced: false,
         firstSeenAt: now,
         lastSeconds: sig.seconds,
         stagnantPolls: 0,
@@ -945,6 +977,7 @@ export function decideStuckToolCallRecovery(
         tag: sig.tag,
         spellStartSeconds: sig.seconds,
         spellPeakSeconds: sig.seconds,
+        spellCounterAdvanced: false,
         firstSeenAt: now,
         lastSeconds: sig.seconds,
         stagnantPolls: 0,
@@ -958,13 +991,21 @@ export function decideStuckToolCallRecovery(
   // open with the same tag so a LATER freeze is detected without re-running
   // the full freezeSeconds window from scratch (the wall-clock measurement
   // restarts from the next stagnation onward, which is the right thing).
-  // Also raise spellPeakSeconds -- the discriminator that separates a real
-  // wedge (climbed before freezing) from a leftover residual footer.
+  // Raise spellPeakSeconds -- the residual-band discriminator -- AND set
+  // spellCounterAdvanced (monotonic): once the counter has shown life in
+  // this spell, the high-counter-residual gate stops suppressing recovery.
   if (prev.lastSeconds !== null && sig.seconds > prev.lastSeconds) {
     const peak = Math.max(prev.spellPeakSeconds ?? sig.seconds, sig.seconds)
     return {
       recover: false,
-      next: { ...prev, spellPeakSeconds: peak, lastSeconds: sig.seconds, stagnantPolls: 0, stagnantSince: null },
+      next: {
+        ...prev,
+        spellPeakSeconds: peak,
+        spellCounterAdvanced: true,
+        lastSeconds: sig.seconds,
+        stagnantPolls: 0,
+        stagnantSince: null,
+      },
     }
   }
   // Counter stagnant (same or rolled-back). Tick the stagnant counter and
@@ -980,19 +1021,44 @@ export function decideStuckToolCallRecovery(
       next: { ...prev, lastSeconds: sig.seconds, stagnantPolls: nextStagnant, stagnantSince: nextStagnantSince },
     }
   }
-  // Recover only when ALL THREE gates hold: wall-clock freeze duration,
-  // anti-fluke poll count, AND spell-peak discriminator. A 5-minute genuine
-  // tool-call resets stagnantSince on every redraw, so even though the call
-  // is long the duration never accumulates. A residual TUI footer left over
-  // from a prior respawn never climbs past minPeakSeconds, so the peak gate
-  // blocks the 2026-06-08 false-positive shape (3-4s residual every poll).
+  // Recover only when ALL FOUR gates hold:
+  //   - wall-clock freeze duration (stagnant for at least freezeSeconds)
+  //   - anti-fluke poll count (at least stagnantPolls consecutive stagnants)
+  //   - spell-peak discriminator (the counter reached at least minPeakSeconds)
+  //   - dual-signal liveness:
+  //       (a) the counter advanced AT LEAST ONCE during the spell, AND
+  //       (b) the session has shown NO external responsiveness since the
+  //           freeze started.
+  //
+  // Gate (a) blocks the 2026-06-09 B-gap shape: a job that completed at
+  // 91s leaves a stale TUI footer. The first observation in the post-work
+  // window sees seconds=91 (passes minPeakSeconds) and never sees the
+  // counter advance, so the wedge looks identical to a real wedge from the
+  // counter alone. Requiring spellCounterAdvanced means the spell must
+  // have shown life in OUR observation before we credit it as a wedge.
+  //
+  // Gate (b) covers the case where the counter DID climb (e.g. work ran
+  // through several observations from 60 -> 75 -> 91) and then the job
+  // completed -- (a) is satisfied, but the session continued processing
+  // inbound and keepalive while the TUI froze. lastResponsiveAt > stagnant-
+  // Since proves liveness; only a fully-silent session qualifies as wedged.
+  //
+  // Tradeoff: a real wedge first observed already-frozen sets neither (a)
+  // nor (b) favorably; this path will NOT recover it. The keepalive-stale
+  // watchdog (KEEPALIVE_STALE_MS=18min in channel-coordinator/liveness.ts)
+  // remains the fallback for that shape. Intentional trade against the
+  // 2026-06-09 B-gap respawn churn (multiple per hour false positives).
   const stagnantMs = now - nextStagnantSince
   const freezeMs = thresholds.freezeSeconds * 1000
   const peak = prev.spellPeakSeconds ?? sig.seconds
+  const sessionResponsive =
+    lastResponsiveAt != null && lastResponsiveAt >= nextStagnantSince
   if (
     stagnantMs < freezeMs ||
     nextStagnant < thresholds.stagnantPolls ||
-    peak < thresholds.minPeakSeconds
+    peak < thresholds.minPeakSeconds ||
+    !prev.spellCounterAdvanced ||
+    sessionResponsive
   ) {
     return {
       recover: false,
