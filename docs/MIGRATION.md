@@ -9,6 +9,114 @@ and new machine against the same token at once — the second poller gets HTTP
 409 Conflict and inbound messages are split/lost. Cut over (old off → new on),
 never overlap.
 
+## Backup configuration
+
+`scripts/backup.sh` resolves its configuration from THREE sources, in this
+precedence order:
+
+1. explicit process environment (e.g. `BACKUP_ENCRYPTION=key bash backup.sh`)
+2. project `.env` (one `key=value` per line; last definition wins; surrounding
+   matching quotes are stripped)
+3. the built-in defaults shown in the table below
+
+Putting the values in `.env` means a scheduled timer (systemd / launchd /
+cron) just runs `bash backup.sh --report --source=scheduled` -- the
+encryption mode and recipient are read at start-up. Manual CLI, dashboard-
+triggered, and scheduled runs all see the same config.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BACKUP_DIR` | `<repo>/backups` | Destination directory for archives. |
+| `BACKUP_KEEP` | `14` | Number of most-recent archives to retain. |
+| `BACKUP_LOG` | `<repo>/store/backups.log` | Append-only operator log. |
+| `BACKUP_ENCRYPTION` | `none` | `none` or `key`. See "Encryption" below. Default is `none` to keep zero-config installs working unchanged; switch to `key` in production. |
+| `BACKUP_AGE_RECIPIENT` | unset | Required when `BACKUP_ENCRYPTION=key`. An `age1...` public key string OR a path to an age recipients file. |
+| `BACKUP_ENCRYPT_CMD` | unset | **Advanced** escape-hatch. If set, replaces the built-in `age` pipeline -- the tar.gz is piped through this command string. Use for gpg/openssl/passphrase or custom flows. Pairs with `BACKUP_ENCRYPT_EXT`. |
+| `BACKUP_ENCRYPT_EXT` | `.enc` | Output extension when `BACKUP_ENCRYPT_CMD` is set. |
+
+Flags:
+- `--report` writes a row to `store/claudeclaw.db` `backup_jobs` table (status,
+  size, duration, encryption mode, source). The dashboard reads from this
+  table.
+- `--source=cli|scheduled|manual` tags the report row. Default: `cli`.
+
+## Encryption
+
+The archive always contains plaintext tokens by definition (dashboard bearer,
+channel bot tokens, `.env` secrets). Encrypt it at rest. Two built-in modes
+plus an escape-hatch.
+
+### Mode 1: `BACKUP_ENCRYPTION=key` (strongly recommended)
+
+Public-key encryption with [age](https://github.com/FiloSottile/age). The
+machine doing the backup only ever needs the PUBLIC key; the matching PRIVATE
+key lives off-site with you and is never on the backup host. Unattended-safe,
+no prompts.
+
+One-time keypair setup (on a separate trusted machine, NOT the backup host):
+
+```bash
+age-keygen -o marveen-backup.identity
+# marveen-backup.identity contains the PRIVATE key. Keep this OFF-SITE
+# (encrypted USB, password manager attachment, hardware token). Losing it
+# = losing every encrypted backup.
+grep '^# public key:' marveen-backup.identity   # → "# public key: age1xxxxx..."
+```
+
+Then on the backup host, set the public key in the project `.env`:
+
+```
+BACKUP_ENCRYPTION=key
+BACKUP_AGE_RECIPIENT=age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Backups land as `claudeclaw-YYYYmmdd-HHMMSS.tar.gz.age`. To restore: provide
+the private key to `scripts/restore.sh` (it auto-detects the `.age` extension
+and prompts / reads from `BACKUP_AGE_IDENTITY` for the key).
+
+### Mode 2: `BACKUP_ENCRYPTION=none` (shipped default, backward-compatible)
+
+Plaintext tar.gz. The script prints a loud warning every run. This is the
+shipped default so that an existing cron / launchd install that ran the
+pre-2026-06-09 `backup.sh` keeps producing archives without configuration
+changes. Acceptable only when the destination is itself encrypted (full-disk
+encryption, encrypted volume) AND never leaves that boundary. Never sync
+this archive to cloud storage unencrypted. Switch to `key` mode as soon as
+you can generate and store an age keypair.
+
+### Mode 3 (advanced): `BACKUP_ENCRYPT_CMD` escape-hatch
+
+If you must use `gpg`, `openssl`, a passphrase, or some other custom flow,
+set the command string. The script pipes the tar.gz through it and appends
+`BACKUP_ENCRYPT_EXT` to the output name.
+
+Examples (place in `.env`):
+
+```
+# GPG symmetric (passphrase-derived)
+BACKUP_ENCRYPT_CMD='gpg --symmetric --cipher-algo AES256 --passphrase-file /etc/marveen/backup.pass --batch --yes --no-tty'
+BACKUP_ENCRYPT_EXT=.gpg
+
+# OpenSSL AES-256-CBC with PBKDF2
+BACKUP_ENCRYPT_CMD='openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/etc/marveen/backup.pass'
+BACKUP_ENCRYPT_EXT=.enc
+
+# age passphrase mode (passphrase from a file). Requires age >= 1.1 and
+# AGE_PASSPHRASE_FD support; not all packaged builds ship this.
+BACKUP_ENCRYPT_CMD='env AGE_PASSPHRASE_FD=3 3</etc/marveen/backup.pass age -p'
+BACKUP_ENCRYPT_EXT=.age
+```
+
+For restore, set the matching `BACKUP_DECRYPT_CMD` (see `scripts/restore.sh
+--help`).
+
+### What MUST live off-site
+
+Whichever mode you pick, the secret-material to decrypt MUST live off-site
+(and protected with its own backup). Losing it = losing every encrypted
+backup. Treat the backup secret like a hardware-key recovery sheet: paper or
+hardware token, not the same drive that holds the encrypted backups.
+
 ---
 
 ## 1. What moves (inventory)
