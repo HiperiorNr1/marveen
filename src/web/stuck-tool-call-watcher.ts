@@ -38,11 +38,14 @@
 // Extend if a sub-agent case ever materialises.
 
 import { execFileSync } from 'node:child_process'
+import { statSync } from 'node:fs'
 import { logger } from '../logger.js'
 import { resolveFromPath } from '../platform.js'
 import { capturePane } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { resumeMarveenSession, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
+import { readLastIngestionTimestamp, TRANSCRIPT_DIR } from './inbound-probe.js'
+import { KEEPALIVE_FILE } from '../channel-coordinator/liveness.js'
 import {
   stuckToolCallSignature,
   decideStuckToolCallRecovery,
@@ -117,11 +120,29 @@ const NO_STATE: StuckToolCallState = {
   tag: null,
   spellStartSeconds: null,
   spellPeakSeconds: null,
+  spellCounterAdvanced: false,
   firstSeenAt: null,
   lastSeconds: null,
   stagnantPolls: 0,
   stagnantSince: null,
   attempts: 0,
+}
+
+// Side-effect signal collector for the dual-signal liveness gate (2026-06-09
+// B-gap follow-up). Returns the wall-clock time (ms) of the most recent
+// external-signal proof of session liveness, or null when neither signal is
+// available. The decider treats this as "session was responsive at AT LEAST
+// this ms" -- a value >= the spell's stagnantSince means the session continued
+// to do real work after the TUI counter froze, so the spell is a stale footer,
+// not a wedge. Both signals are best-effort; a missing file falls back to the
+// other and ultimately to null (which the decider treats as "no proof of
+// responsiveness", letting the spell-counter-advanced gate carry the decision).
+export function readSessionLastResponsiveAtMs(): number | null {
+  const lastInboundTs = readLastIngestionTimestamp(TRANSCRIPT_DIR)
+  let keepaliveMtime: number | null = null
+  try { keepaliveMtime = statSync(KEEPALIVE_FILE).mtimeMs } catch { /* missing */ }
+  if (lastInboundTs == null && keepaliveMtime == null) return null
+  return Math.max(lastInboundTs ?? 0, keepaliveMtime ?? 0)
 }
 
 // Session-keyed state map. Only the main session ever has an entry today,
@@ -145,7 +166,8 @@ function checkSession(label: string, session: string): void {
   const sig = pane == null ? null : stuckToolCallSignature(pane)
 
   const prev = watchState.get(session) ?? NO_STATE
-  const { recover, next } = decideStuckToolCallRecovery(sig, prev, Date.now(), THRESHOLDS)
+  const lastResponsiveAt = readSessionLastResponsiveAtMs()
+  const { recover, next } = decideStuckToolCallRecovery(sig, prev, Date.now(), THRESHOLDS, lastResponsiveAt)
 
   if (next.tag === null) {
     watchState.delete(session)
@@ -195,7 +217,10 @@ function checkSession(label: string, session: string): void {
         tag: next.tag,
         seconds: next.lastSeconds,
         spellPeakSeconds: next.spellPeakSeconds,
+        spellCounterAdvanced: next.spellCounterAdvanced,
         stagnantPolls: next.stagnantPolls,
+        stagnantSince: next.stagnantSince,
+        lastResponsiveAt,
         cpuPercent,
         thresholds: THRESHOLDS,
       },
