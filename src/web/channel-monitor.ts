@@ -277,6 +277,13 @@ export function resumeMarveenSession(): boolean {
     // direct. Schedule the same probe in-process so the plugin doesn't get
     // stuck in `◯ disabled` after an in-process respawn (2026-06-01 18:55).
     schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
+    // Stamp the shared respawn timestamp so lastMainRespawnAt() sees this
+    // respawn from any caller (down-cascade stage 3, stuck-tool-call-watcher,
+    // external systemd-timer watchdog). Without it the watcher cannot defer
+    // its own self-respawn-and-recheck within the post-respawn grace, which
+    // produced the 2026-06-08 false-positive loop (13 respawns in 8h on
+    // residual 3-4s counters left over from the prior respawn's TUI redraw).
+    writeRespawnStamp()
     return true
   } catch (err) {
     logger.error({ err }, 'Marveen session respawn failed')

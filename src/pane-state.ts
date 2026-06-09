@@ -813,6 +813,14 @@ export interface StuckToolCallState {
   /** The seconds value observed when the spell started -- preserved for the
    * audit log so an operator can tell at what counter value the freeze happened. */
   spellStartSeconds: number | null
+  /** Highest seconds value observed in this spell. Load-bearing for the
+   * spell-peak discriminator: a residual TUI footer left over from a prior
+   * respawn never climbs (stays at 3-4s across every observation), while a
+   * legitimately running tool-call that wedges climbed to a meaningful value
+   * before stalling. Recovery is gated on spellPeakSeconds >= minPeakSeconds
+   * so the residual band does not look like a wedge (2026-06-08 false-positive
+   * loop: 13 self-respawns in 8h triggered by 3-4s residuals every poll). */
+  spellPeakSeconds: number | null
   /** When the spell was first observed (ms). */
   firstSeenAt: number | null
   /** Last observed seconds value, used to detect stagnation across polls. */
@@ -847,6 +855,14 @@ export interface StuckToolCallThresholds {
    * increments every TUI redraw, so multi-poll stagnation is conclusive.
    * Composed WITH the wall-clock freezeSeconds check -- BOTH must hold. */
   stagnantPolls: number
+  /** Spell-peak discriminator (2026-06-08 fix): the highest seconds value the
+   * counter has reached in this spell must be at LEAST this many seconds for
+   * the spell to qualify as a wedge. A residual TUI footer left over after a
+   * prior respawn never climbs (stays at 3-4s every poll); a legitimately
+   * wedged tool-call climbed to a meaningful value before freezing (the
+   * 2026-06-02 incident sat at 31s). Composed AND with the wall-clock and
+   * anti-fluke gates -- all three must hold. */
+  minPeakSeconds: number
 }
 
 export interface StuckToolCallDecision {
@@ -857,6 +873,7 @@ export interface StuckToolCallDecision {
 const NO_STUCK_TOOL_CALL: StuckToolCallState = {
   tag: null,
   spellStartSeconds: null,
+  spellPeakSeconds: null,
   firstSeenAt: null,
   lastSeconds: null,
   stagnantPolls: 0,
@@ -905,6 +922,7 @@ export function decideStuckToolCallRecovery(
       next: {
         tag: sig.tag,
         spellStartSeconds: sig.seconds,
+        spellPeakSeconds: sig.seconds,
         firstSeenAt: now,
         lastSeconds: sig.seconds,
         stagnantPolls: 0,
@@ -920,6 +938,7 @@ export function decideStuckToolCallRecovery(
       next: {
         tag: sig.tag,
         spellStartSeconds: sig.seconds,
+        spellPeakSeconds: sig.seconds,
         firstSeenAt: now,
         lastSeconds: sig.seconds,
         stagnantPolls: 0,
@@ -933,10 +952,13 @@ export function decideStuckToolCallRecovery(
   // open with the same tag so a LATER freeze is detected without re-running
   // the full freezeSeconds window from scratch (the wall-clock measurement
   // restarts from the next stagnation onward, which is the right thing).
+  // Also raise spellPeakSeconds -- the discriminator that separates a real
+  // wedge (climbed before freezing) from a leftover residual footer.
   if (prev.lastSeconds !== null && sig.seconds > prev.lastSeconds) {
+    const peak = Math.max(prev.spellPeakSeconds ?? sig.seconds, sig.seconds)
     return {
       recover: false,
-      next: { ...prev, lastSeconds: sig.seconds, stagnantPolls: 0, stagnantSince: null },
+      next: { ...prev, spellPeakSeconds: peak, lastSeconds: sig.seconds, stagnantPolls: 0, stagnantSince: null },
     }
   }
   // Counter stagnant (same or rolled-back). Tick the stagnant counter and
@@ -952,13 +974,20 @@ export function decideStuckToolCallRecovery(
       next: { ...prev, lastSeconds: sig.seconds, stagnantPolls: nextStagnant, stagnantSince: nextStagnantSince },
     }
   }
-  // Recover only when BOTH gates hold: wall-clock freeze duration AND
-  // anti-fluke poll count. A 5-minute genuine tool-call resets
-  // stagnantSince on every redraw, so even though the call is long this
-  // duration never accumulates.
+  // Recover only when ALL THREE gates hold: wall-clock freeze duration,
+  // anti-fluke poll count, AND spell-peak discriminator. A 5-minute genuine
+  // tool-call resets stagnantSince on every redraw, so even though the call
+  // is long the duration never accumulates. A residual TUI footer left over
+  // from a prior respawn never climbs past minPeakSeconds, so the peak gate
+  // blocks the 2026-06-08 false-positive shape (3-4s residual every poll).
   const stagnantMs = now - nextStagnantSince
   const freezeMs = thresholds.freezeSeconds * 1000
-  if (stagnantMs < freezeMs || nextStagnant < thresholds.stagnantPolls) {
+  const peak = prev.spellPeakSeconds ?? sig.seconds
+  if (
+    stagnantMs < freezeMs ||
+    nextStagnant < thresholds.stagnantPolls ||
+    peak < thresholds.minPeakSeconds
+  ) {
     return {
       recover: false,
       next: { ...prev, lastSeconds: sig.seconds, stagnantPolls: nextStagnant, stagnantSince: nextStagnantSince },
