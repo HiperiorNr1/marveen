@@ -15,6 +15,7 @@ import { logger } from '../logger.js'
 import { PROJECT_ROOT } from '../config.js'
 import { channelStateDir, type ChannelProviderType } from '../channel-provider.js'
 import { agentDir } from '../web/agent-config.js'
+import { matchesProviderPollerCmd } from './provider-poller-match.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -47,92 +48,110 @@ export function getClaudePidForSession(session: string): number | null {
   }
 }
 
+/**
+ * Pure decision: does the parsed `ps` snapshot + bot.pid + alive-predicate
+ * prove that the `providerType` channel plugin is alive under `claudePid`?
+ *
+ * Extracted 1:1 from `hasChannelPluginAlive` for testability (matches the
+ * `decideStuckToolCallRecovery` pure-decider pattern used elsewhere). The
+ * branching, ordering, and bot.pid + cross-tree fallbacks are preserved
+ * verbatim; only the per-provider command-line matching delegates to
+ * `matchesProviderPollerCmd` (the path-boundary matcher that closes the
+ * multi-plugin masking gap).
+ */
+export interface PluginAliveContext {
+  psOutput: string
+  claudePid: number
+  providerType: ChannelProviderType
+  botPid: number | null
+  isPidAlive: (pid: number) => boolean
+  agentName?: string
+  debugLog?: (event: string, fields: Record<string, unknown>) => void
+}
+
+export function decideHasPluginAlive(ctx: PluginAliveContext): boolean {
+  const { psOutput, claudePid, providerType, botPid, isPidAlive, agentName, debugLog } = ctx
+  const lines = psOutput.split('\n').slice(1)
+  const childrenOf = new Map<number, number[]>()
+  const cmdOf = new Map<number, string>()
+  for (const line of lines) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/)
+    if (!m) continue
+    const pid = parseInt(m[1], 10)
+    const ppid = parseInt(m[2], 10)
+    cmdOf.set(pid, m[3])
+    const arr = childrenOf.get(ppid) || []
+    arr.push(pid)
+    childrenOf.set(ppid, arr)
+  }
+
+  const stack = [claudePid]
+  const seen = new Set<number>()
+  while (stack.length) {
+    const p = stack.pop()!
+    if (seen.has(p)) continue
+    seen.add(p)
+    const cmd = cmdOf.get(p) || ''
+    if (matchesProviderPollerCmd(cmd, providerType)) return true
+    for (const k of (childrenOf.get(p) || [])) stack.push(k)
+  }
+
+  if (botPid !== null && botPid > 1) {
+    if (isPidAlive(botPid)) {
+      const cmd = cmdOf.get(botPid) || ''
+      if (matchesProviderPollerCmd(cmd, providerType)) {
+        debugLog?.('plugin alive via bot.pid (reparented)', { claudePid, orphanPid: botPid, agentName, providerType })
+        return true
+      }
+    }
+  }
+
+  if (providerType === 'slack') {
+    for (const [pid, cmd] of cmdOf) {
+      if (seen.has(pid)) continue
+      if (matchesProviderPollerCmd(cmd, providerType) && isPidAlive(pid)) {
+        debugLog?.('slack plugin alive via process scan', { claudePid, slackPid: pid, agentName })
+        return true
+      }
+    }
+  }
+
+  if (providerType === 'discord') {
+    for (const [pid, cmd] of cmdOf) {
+      if (seen.has(pid)) continue
+      if (matchesProviderPollerCmd(cmd, providerType) && isPidAlive(pid)) {
+        debugLog?.('discord plugin alive via process scan', { claudePid, discordPid: pid, agentName })
+        return true
+      }
+    }
+  }
+
+  return false
+}
+
 export function hasChannelPluginAlive(claudePid: number, providerType: ChannelProviderType, agentName?: string): boolean {
   try {
-    const ps = execFileSync('/bin/ps', ['-axo', 'pid,ppid,command'], { timeout: 3000, encoding: 'utf-8' })
-    const lines = ps.split('\n').slice(1)
-    const childrenOf = new Map<number, number[]>()
-    const cmdOf = new Map<number, string>()
-    for (const line of lines) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/)
-      if (!m) continue
-      const pid = parseInt(m[1], 10)
-      const ppid = parseInt(m[2], 10)
-      cmdOf.set(pid, m[3])
-      const arr = childrenOf.get(ppid) || []
-      arr.push(pid)
-      childrenOf.set(ppid, arr)
-    }
-
-    const stack = [claudePid]
-    const seen = new Set<number>()
-    while (stack.length) {
-      const p = stack.pop()!
-      if (seen.has(p)) continue
-      seen.add(p)
-      const cmd = cmdOf.get(p) || ''
-      if (providerType === 'telegram') {
-        if (cmd.includes('/telegram/') && cmd.includes('bun')) return true
-        if (/\bbun\b/.test(cmd) && cmd.includes('server.ts')) return true
-      } else if (providerType === 'discord') {
-        if (cmd.includes('discord') && (cmd.includes('node') || cmd.includes('bun'))) return true
-      } else {
-        if (cmd.includes('slack') && cmd.includes('node')) return true
-        if (cmd.includes('slack-channel') && (cmd.includes('bun') || cmd.includes('node'))) return true
-      }
-      for (const k of (childrenOf.get(p) || [])) stack.push(k)
-    }
-
+    const psOutput = execFileSync('/bin/ps', ['-axo', 'pid,ppid,command'], { timeout: 3000, encoding: 'utf-8' })
     const stateDir = agentName
       ? channelStateDir(providerType, agentDir(agentName))
       : channelStateDir(providerType)
     const pidPath = join(stateDir, 'bot.pid')
+    let botPid: number | null = null
     if (existsSync(pidPath)) {
-      const pid = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10)
-      if (pid > 1) {
-        try {
-          process.kill(pid, 0)
-          const cmd = cmdOf.get(pid) || ''
-          const isRelevant = providerType === 'telegram'
-            ? (cmd.includes('bun') || cmd.includes('server.ts') || cmd.includes('telegram'))
-            : providerType === 'discord'
-              ? (cmd.includes('discord') && (cmd.includes('node') || cmd.includes('bun')))
-              : (cmd.includes('node') || cmd.includes('slack'))
-          if (isRelevant) {
-            logger.debug({ claudePid, orphanPid: pid, agentName, providerType }, 'Channel plugin alive via bot.pid (reparented)')
-            return true
-          }
-        } catch { /* process gone */ }
-      }
+      const parsed = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10)
+      if (Number.isFinite(parsed)) botPid = parsed
     }
-
-    if (providerType === 'slack') {
-      for (const [pid, cmd] of cmdOf) {
-        if (seen.has(pid)) continue
-        if ((cmd.includes('slack') || cmd.includes('socket-mode')) && (cmd.includes('node') || cmd.includes('bun'))) {
-          try {
-            process.kill(pid, 0)
-            logger.debug({ claudePid, slackPid: pid, agentName }, 'Slack plugin alive via process scan')
-            return true
-          } catch { /* gone */ }
-        }
-      }
-    }
-
-    if (providerType === 'discord') {
-      for (const [pid, cmd] of cmdOf) {
-        if (seen.has(pid)) continue
-        if (cmd.includes('discord') && (cmd.includes('node') || cmd.includes('bun'))) {
-          try {
-            process.kill(pid, 0)
-            logger.debug({ claudePid, discordPid: pid, agentName }, 'Discord plugin alive via process scan')
-            return true
-          } catch { /* gone */ }
-        }
-      }
-    }
-
-    return false
+    return decideHasPluginAlive({
+      psOutput,
+      claudePid,
+      providerType,
+      botPid,
+      agentName,
+      isPidAlive: (pid) => {
+        try { process.kill(pid, 0); return true } catch { return false }
+      },
+      debugLog: (event, fields) => logger.debug(fields, event),
+    })
   } catch {
     return false
   }
