@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
 import { logger } from '../logger.js'
 import { wrapUntrusted, UNTRUSTED_PREAMBLE } from '../prompt-safety.js'
-import { sendPromptToSession, isSessionReadyForPrompt } from './agent-process.js'
+import { sendPromptToSession, isSessionReadyForPrompt, agentSessionName } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { getSecret } from './vault.js'
 
@@ -56,15 +56,23 @@ async function sendSynoAck(channelId: string, threadId?: string): Promise<void> 
   }
 }
 
-// Resolve the tmux session that owns an agent slug. Mirrors main-agent.ts:9
-// (`MAIN_CHANNELS_SESSION = ${MAIN_AGENT_ID}-channels`) and extends the same
-// convention to sub-agents: agent='kelvin' -> 'kelvin-channels'. NULL/empty
-// slug falls back to MAIN_CHANNELS_SESSION so Phase-1 pending rows (where
-// the listener never stamped an agent) still drain to the main agent.
+// Resolve the tmux session that owns an agent slug.
+//
+// The main channels agent runs in MAIN_CHANNELS_SESSION = `${MAIN_AGENT_ID}-channels`
+// (main-agent.ts:9, started by channels.sh + systemd). Sub-agents instead
+// run in the session that startAgentProcess spawns, named by agentSessionName
+// = `agent-${slug}` (agent-process.ts:31, e.g. 'agent-kelvin', 'agent-dia').
+// The two naming schemes are different on purpose -- only the main agent
+// owns the channels-plugin polling pane, sub-agents reuse the standard
+// agent-process lifecycle.
+//
+// NULL/empty slug falls back to MAIN_CHANNELS_SESSION so Phase-1 pending
+// rows (where the listener never stamped an agent) still drain to the main
+// agent.
 function resolveSessionForAgent(slug: string | null | undefined): string {
   if (!slug) return MAIN_CHANNELS_SESSION
   if (slug === MAIN_AGENT_ID) return MAIN_CHANNELS_SESSION
-  return `${slug}-channels`
+  return agentSessionName(slug)
 }
 
 function pollOnce(): void {
