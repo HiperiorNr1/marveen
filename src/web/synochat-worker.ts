@@ -1,10 +1,10 @@
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
 import { logger } from '../logger.js'
 import { wrapUntrusted, UNTRUSTED_PREAMBLE } from '../prompt-safety.js'
-import { sendPromptToSession, isSessionReadyForPrompt } from './agent-process.js'
+import { sendPromptToSession, isSessionReadyForPrompt, agentSessionName } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { getSecret } from './vault.js'
 
@@ -56,11 +56,27 @@ async function sendSynoAck(channelId: string, threadId?: string): Promise<void> 
   }
 }
 
+// Resolve the tmux session that owns an agent slug.
+//
+// The main channels agent runs in MAIN_CHANNELS_SESSION = `${MAIN_AGENT_ID}-channels`
+// (main-agent.ts:9, started by channels.sh + systemd). Sub-agents instead
+// run in the session that startAgentProcess spawns, named by agentSessionName
+// = `agent-${slug}` (agent-process.ts:31, e.g. 'agent-kelvin', 'agent-dia').
+// The two naming schemes are different on purpose -- only the main agent
+// owns the channels-plugin polling pane, sub-agents reuse the standard
+// agent-process lifecycle.
+//
+// NULL/empty slug falls back to MAIN_CHANNELS_SESSION so Phase-1 pending
+// rows (where the listener never stamped an agent) still drain to the main
+// agent.
+function resolveSessionForAgent(slug: string | null | undefined): string {
+  if (!slug) return MAIN_CHANNELS_SESSION
+  if (slug === MAIN_AGENT_ID) return MAIN_CHANNELS_SESSION
+  return agentSessionName(slug)
+}
+
 function pollOnce(): void {
   if (!existsSync(QUEUE_DB)) return
-  // Don't inject while the session is busy/parked -- leave the rows pending
-  // and retry next tick (mirrors the schedule-runner's skip-if-busy posture).
-  if (!isSessionReadyForPrompt(MAIN_CHANNELS_SESSION)) return
 
   let db: Database.Database | undefined
   try {
@@ -68,7 +84,7 @@ function pollOnce(): void {
     db.pragma('busy_timeout = 5000')
     const pending = db
       .prepare(
-        `SELECT id, user_id, username, channel_id, text, post_id, thread_id
+        `SELECT id, user_id, username, channel_id, text, post_id, thread_id, agent
          FROM incoming_messages WHERE status='pending'
          ORDER BY id ASC LIMIT ?`,
       )
@@ -80,9 +96,18 @@ function pollOnce(): void {
         text: string
         post_id: string | null
         thread_id: string | null
+        agent: string | null
       }>
 
     for (const msg of pending) {
+      // Per-agent routing: the listener stamped incoming_messages.agent at
+      // ingest based on the bot-token map (Phase-2). Unstamped legacy rows
+      // (agent=NULL) fall back to MAIN_CHANNELS_SESSION (Phase-1 behaviour).
+      const targetSession = resolveSessionForAgent(msg.agent)
+      // Skip if the target session is not ready -- leave the row pending
+      // and retry next tick. Single-agent Phase-1 flow used the same posture
+      // against MAIN_CHANNELS_SESSION; now it applies per row.
+      if (!isSessionReadyForPrompt(targetSession)) continue
       // SynoChat input is external (a colleague typed it) -> untrusted.
       const wrapped = wrapUntrusted(`synology-chat:user-${msg.user_id}`, msg.text)
       // Thread target: if the colleague already wrote inside a thread, reuse it;
@@ -99,25 +124,37 @@ function pollOnce(): void {
         `A thread_id-t add at valtozatlanul, hogy a valasz a kerdes hozzaszolas-lancaba keruljon. ` +
         `A SynoChat a belso kollegak csatornaja; tartsd szem elott az ugyfel-PII vedelmet.`
       try {
-        sendPromptToSession(MAIN_CHANNELS_SESSION, prompt)
+        sendPromptToSession(targetSession, prompt)
         db.prepare(
           "UPDATE incoming_messages SET status='delivered', delivered_at=strftime('%s','now') WHERE id=?",
         ).run(msg.id)
-        logger.info({ id: msg.id, user: msg.user_id }, 'SynoChat message delivered to agent')
+        logger.info(
+          { id: msg.id, user: msg.user_id, agent: msg.agent ?? '(default)', session: targetSession },
+          'SynoChat message delivered to agent',
+        )
         // Liveness ack -- fire-and-forget so a slow/failed POST never stalls
         // the loop or blocks the next message's delivery. Same thread as reply.
-        void sendSynoAck(msg.channel_id, replyThreadId).catch((err) =>
-          logger.warn(
-            { err: err instanceof Error ? err.message : String(err), id: msg.id },
-            'SynoChat ack failed',
-          ),
-        )
+        // SCOPE LIMIT (Phase-2): the worker only knows the main agent's
+        // incoming-webhook URL (INCOMING_URL_VAULT_KEY). For routed
+        // sub-agent rows (kelvin etc.) we'd be acking from the main agent's
+        // bot, which would land in the wrong DM and read as cross-talk. So
+        // we skip the ack for non-main routes and rely on the sub-agent's
+        // actual reply to signal liveness. Phase-3 nice-to-have: an
+        // agent->incoming-URL map at the worker level.
+        if (targetSession === MAIN_CHANNELS_SESSION) {
+          void sendSynoAck(msg.channel_id, replyThreadId).catch((err) =>
+            logger.warn(
+              { err: err instanceof Error ? err.message : String(err), id: msg.id },
+              'SynoChat ack failed',
+            ),
+          )
+        }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
         db.prepare(
           "UPDATE incoming_messages SET status='failed', failed_at=strftime('%s','now'), last_error=? WHERE id=?",
         ).run(errMsg, msg.id)
-        logger.warn({ err: errMsg, id: msg.id }, 'SynoChat delivery to agent failed')
+        logger.warn({ err: errMsg, id: msg.id, session: targetSession }, 'SynoChat delivery to agent failed')
       }
     }
   } catch (err) {
@@ -126,6 +163,9 @@ function pollOnce(): void {
     try { db?.close() } catch { /* already closed */ }
   }
 }
+
+// Re-exported for unit tests.
+export { resolveSessionForAgent }
 
 export function startSynoChatWorker(): ReturnType<typeof setInterval> {
   return setInterval(pollOnce, POLL_MS)
