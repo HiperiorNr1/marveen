@@ -126,12 +126,21 @@ function pollOnce(): void {
         )
         // Liveness ack -- fire-and-forget so a slow/failed POST never stalls
         // the loop or blocks the next message's delivery. Same thread as reply.
-        void sendSynoAck(msg.channel_id, replyThreadId).catch((err) =>
-          logger.warn(
-            { err: err instanceof Error ? err.message : String(err), id: msg.id },
-            'SynoChat ack failed',
-          ),
-        )
+        // SCOPE LIMIT (Phase-2): the worker only knows the main agent's
+        // incoming-webhook URL (INCOMING_URL_VAULT_KEY). For routed
+        // sub-agent rows (kelvin etc.) we'd be acking from the main agent's
+        // bot, which would land in the wrong DM and read as cross-talk. So
+        // we skip the ack for non-main routes and rely on the sub-agent's
+        // actual reply to signal liveness. Phase-3 nice-to-have: an
+        // agent->incoming-URL map at the worker level.
+        if (targetSession === MAIN_CHANNELS_SESSION) {
+          void sendSynoAck(msg.channel_id, replyThreadId).catch((err) =>
+            logger.warn(
+              { err: err instanceof Error ? err.message : String(err), id: msg.id },
+              'SynoChat ack failed',
+            ),
+          )
+        }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
         db.prepare(
