@@ -1,5 +1,7 @@
 import { logger } from '../logger.js'
 import { notifyChannel } from '../notify.js'
+import { detectPaneState } from '../pane-state.js'
+import { capturePane } from './agent-process.js'
 
 // Operator alert for messages stuck behind a deferral. Two causes qualify:
 //   'human'   -- the interference guard keeps deferring because a human
@@ -30,11 +32,26 @@ export function shouldSendDeferAlert(
   return !alreadySent && cause !== 'busy' && ageMs > thresholdMs
 }
 
+// Classify WHY a not-ready session defers: a busy pane is a normal long
+// turn (never alerts), anything else means the unblock attempts are not
+// landing. Null when the pane can't be captured -- a transient tmux failure
+// is not evidence of a blocked session, so callers skip alerting that tick
+// and re-classify on the next one.
+export function classifyDeferCause(session: string): DeferCause | null {
+  const pane = capturePane(session)
+  if (pane == null) return null
+  return detectPaneState(pane) === 'busy' ? 'busy' : 'blocked'
+}
+
 const sentAlertKeys = new Set<string>()
 
-const CAUSE_LABEL: Record<Exclude<DeferCause, 'busy'>, string> = {
+// Total over DeferCause: 'busy' is unreachable through shouldSendDeferAlert,
+// but keeping the entry avoids an unsound cast that would surface as
+// "Ok: undefined" in the operator alert if the gate ever changed.
+const CAUSE_LABEL: Record<DeferCause, string> = {
   human: 'emberi kliens aktiv a pane-ben, az injektalas halasztva',
   blocked: 'a session nem fogad promptot (modal vagy ismeretlen pane-allapot)',
+  busy: 'a session egy hosszu futo turn-ben dolgozik',
 }
 
 export function maybeSendDeferAlert(opts: {
@@ -51,7 +68,7 @@ export function maybeSendDeferAlert(opts: {
     { key: opts.key, session: opts.session, cause: opts.cause, ageMin },
     'Delivery deferred past alert threshold -- notifying operator',
   )
-  const causeLabel = CAUSE_LABEL[opts.cause as Exclude<DeferCause, 'busy'>]
+  const causeLabel = CAUSE_LABEL[opts.cause]
   void notifyChannel(
     `⏳ Kezbesites elakadva: ${opts.what} mar ${ageMin} perce var a(z) ${opts.session} session-re. Ok: ${causeLabel}. Az uzenet nem veszett el, kezbesitjuk amint a session felszabadul.`,
   ).catch(() => { /* notifyChannel already logs internally */ })

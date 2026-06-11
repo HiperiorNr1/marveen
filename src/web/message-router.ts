@@ -26,10 +26,8 @@ import {
   sendPromptToSession,
   humanClientActive,
   tryUnblockSessionModals,
-  capturePane,
 } from './agent-process.js'
-import { detectPaneState } from '../pane-state.js'
-import { maybeSendDeferAlert, clearDeferAlert, DEFER_ALERT_AFTER_MS } from './defer-alert.js'
+import { maybeSendDeferAlert, clearDeferAlert, classifyDeferCause, DEFER_ALERT_AFTER_MS } from './defer-alert.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
 const TMUX = resolveFromPath('tmux')
@@ -135,19 +133,20 @@ export function startMessageRouter(): NodeJS.Timeout {
         // and this loop is the only consumer that notices -- dismiss it
         // proactively so the next tick can deliver. Rate-limited internally.
         tryUnblockSessionModals(session)
-        // Past the alert threshold, classify WHY the session is not ready: a
-        // busy pane is a normal long turn (no alert), anything else means the
-        // unblock attempts are not landing and the operator should know.
+        // Past the alert threshold, classify WHY the session is not ready and
+        // notify the operator once (busy = normal long turn, never alerts;
+        // null = transient capture failure, re-classify next tick).
         if (ageMs > DEFER_ALERT_AFTER_MS) {
-          const pane = capturePane(session)
-          const cause = pane != null && detectPaneState(pane) === 'busy' ? 'busy' : 'blocked'
-          maybeSendDeferAlert({
-            key: `agent-msg-${msg.id}`,
-            ageMs,
-            cause,
-            session,
-            what: `@${msg.from_agent} -> @${msg.to_agent} agens-uzenet (#${msg.id})`,
-          })
+          const cause = classifyDeferCause(session)
+          if (cause != null) {
+            maybeSendDeferAlert({
+              key: `agent-msg-${msg.id}`,
+              ageMs,
+              cause,
+              session,
+              what: `@${msg.from_agent} -> @${msg.to_agent} agens-uzenet (#${msg.id})`,
+            })
+          }
         }
         if (!routerLoggedMisses.has(msg.id)) {
           logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session busy, will retry')
