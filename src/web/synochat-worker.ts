@@ -10,10 +10,8 @@ import {
   agentSessionName,
   humanClientActive,
   tryUnblockSessionModals,
-  capturePane,
 } from './agent-process.js'
-import { detectPaneState } from '../pane-state.js'
-import { maybeSendDeferAlert, clearDeferAlert, DEFER_ALERT_AFTER_MS } from './defer-alert.js'
+import { maybeSendDeferAlert, clearDeferAlert, classifyDeferCause, DEFER_ALERT_AFTER_MS } from './defer-alert.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { getSecret } from './vault.js'
 
@@ -136,15 +134,16 @@ function pollOnce(): void {
       if (!isSessionReadyForPrompt(targetSession)) {
         tryUnblockSessionModals(targetSession)
         if (ageMs > DEFER_ALERT_AFTER_MS) {
-          const pane = capturePane(targetSession)
-          const cause = pane != null && detectPaneState(pane) === 'busy' ? 'busy' : 'blocked'
-          maybeSendDeferAlert({
-            key: `synochat-${msg.id}`,
-            ageMs,
-            cause,
-            session: targetSession,
-            what: `SynoChat uzenet (#${msg.id}, ${msg.username || 'ismeretlen'})`,
-          })
+          const cause = classifyDeferCause(targetSession)
+          if (cause != null) {
+            maybeSendDeferAlert({
+              key: `synochat-${msg.id}`,
+              ageMs,
+              cause,
+              session: targetSession,
+              what: `SynoChat uzenet (#${msg.id}, ${msg.username || 'ismeretlen'})`,
+            })
+          }
         }
         continue
       }
