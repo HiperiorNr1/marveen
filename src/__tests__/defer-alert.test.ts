@@ -17,6 +17,10 @@ describe('shouldSendDeferAlert', () => {
     expect(shouldSendDeferAlert(OLD, 'blocked', false)).toBe(true)
   })
 
+  it('alerts for an old draft-deferred message (only its author can resolve it)', () => {
+    expect(shouldSendDeferAlert(OLD, 'draft', false)).toBe(true)
+  })
+
   it('never alerts for a busy session, regardless of age', () => {
     expect(shouldSendDeferAlert(OLD * 100, 'busy', false)).toBe(false)
   })

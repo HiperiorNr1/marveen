@@ -186,10 +186,7 @@ export function detectsThinkingBlockError(pane: string): boolean {
   const lines = pane.split('\n')
   // Find the footer from the bottom: the live footer is the last line of
   // the pane, so a footer-looking line quoted in scrollback must not win.
-  let footerIdx = -1
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (IDLE_FOOTER_RX.test(lines[i])) { footerIdx = i; break }
-  }
+  const footerIdx = lastFooterIndex(lines)
   if (footerIdx < 0) return false
   const start = Math.max(0, footerIdx - ERROR_LIVE_TAIL_LINES)
   const tail = lines.slice(start, footerIdx)
@@ -247,33 +244,39 @@ export function detectPaneState(
   const footerRegion = paneLines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return 'busy'
 
-  if (!IDLE_FOOTER_RX.test(pane)) return 'unknown'
+  // The LIVE idle footer must sit in the bottom region of the pane (the
+  // same scope the esc-to-interrupt check uses -- Claude Code always
+  // renders it at the bottom). A footer-phrase that only occurs higher up
+  // is a scrollback QUOTE (watchdog report, displayed test fixture): the
+  // live footer is absent, so the surface is a modal / mid-render / not
+  // Claude Code -> 'unknown' and the router defers, instead of the old
+  // whole-pane IDLE_FOOTER_RX test passing on the quote and the box scan
+  // anchoring off the live input box (2026-06-11 draft-merge incident).
+  const footerIdx = lastFooterIndex(paneLines)
+  if (footerIdx < 0 || paneLines.length - footerIdx > LIVE_FOOTER_REGION_LINES) return 'unknown'
 
   if (detectsThinkingBlockError(pane)) return 'error'
 
   if (PENDING_PASTE_RX.test(pane)) return 'busy'
 
-  // Find the input box: two BOX_SEP_RX lines framing the current prompt.
-  // Scan UPWARDS from the footer so we stay inside the live box and
-  // don't pick up historical ❯ lines from scrollback.
-  const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-  if (footerIdx >= 0) {
-    let bottomSep = -1
-    for (let i = footerIdx - 1; i >= 0; i--) {
-      if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
+  // Find the input box: two BOX_SEP_RX lines framing the current prompt,
+  // scanning UPWARDS from the (bottom-anchored) live footer so we stay
+  // inside the live box and don't pick up historical ❯ lines from
+  // scrollback.
+  let bottomSep = -1
+  for (let i = footerIdx - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(paneLines[i])) { bottomSep = i; break }
+  }
+  let topSep = -1
+  if (bottomSep > 0) {
+    for (let i = bottomSep - 1; i >= 0; i--) {
+      if (BOX_SEP_RX.test(paneLines[i])) { topSep = i; break }
     }
-    let topSep = -1
-    if (bottomSep > 0) {
-      for (let i = bottomSep - 1; i >= 0; i--) {
-        if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
-      }
-    }
-    if (topSep >= 0 && bottomSep > topSep) {
-      const inputLines = lines.slice(topSep + 1, bottomSep)
-      if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
-        return opts.mergeTypingAsBusy ? 'busy' : 'typing'
-      }
+  }
+  if (topSep >= 0 && bottomSep > topSep) {
+    const inputLines = paneLines.slice(topSep + 1, bottomSep)
+    if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
+      return opts.mergeTypingAsBusy ? 'busy' : 'typing'
     }
   }
 
@@ -289,6 +292,17 @@ export function isReadyForPrompt(pane: string): boolean {
   return detectPaneState(pane) === 'idle'
 }
 
+// Bottom-anchored idle-footer lookup: the live footer is always the
+// LAST matching line of the pane. A top-anchored findIndex would latch
+// onto a quoted footer-phrase in scrollback and shift every box-scoped
+// detector off the live input box.
+function lastFooterIndex(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (IDLE_FOOTER_RX.test(lines[i])) return i
+  }
+  return -1
+}
+
 // Locate the live Claude Code input box and return its inner content as
 // one string. Bounded strictly to the region between the two most
 // recent BOX_SEP_RX separators above the idle footer, so a parked input
@@ -299,8 +313,10 @@ export function isReadyForPrompt(pane: string): boolean {
 // "not enough signal to act, do nothing".
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-  if (footerIdx < 0) return null
+  const footerIdx = lastFooterIndex(lines)
+  // Same bottom-region rule as detectPaneState: a footer-phrase only in
+  // scrollback means the live footer (and so the live box) is absent.
+  if (footerIdx < 0 || lines.length - footerIdx > LIVE_FOOTER_REGION_LINES) return null
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
     if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }

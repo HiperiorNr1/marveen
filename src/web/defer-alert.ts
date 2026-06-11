@@ -3,9 +3,11 @@ import { notifyChannel } from '../notify.js'
 import { detectPaneState } from '../pane-state.js'
 import { capturePane } from './agent-process.js'
 
-// Operator alert for messages stuck behind a deferral. Two causes qualify:
+// Operator alert for messages stuck behind a deferral. Three causes qualify:
 //   'human'   -- the interference guard keeps deferring because a human
 //                client is active in the target pane;
+//   'draft'   -- an unsubmitted draft sits in the input box; only its
+//                author can resolve it, the label tells them how;
 //   'blocked' -- the session never becomes ready (modal / unknown pane
 //                state) despite the proactive unblock attempts.
 // 'busy' never alerts: a long-running turn is normal operation.
@@ -18,7 +20,7 @@ import { capturePane } from './agent-process.js'
 // on delivery/failure so the set stays bounded. A dashboard restart resets
 // it (worst case: one repeat alert per still-stuck message) -- accepted.
 
-export type DeferCause = 'human' | 'blocked' | 'busy'
+export type DeferCause = 'human' | 'draft' | 'blocked' | 'busy'
 
 export const DEFER_ALERT_AFTER_MS = 10 * 60 * 1000
 
@@ -33,14 +35,18 @@ export function shouldSendDeferAlert(
 }
 
 // Classify WHY a not-ready session defers: a busy pane is a normal long
-// turn (never alerts), anything else means the unblock attempts are not
-// landing. Null when the pane can't be captured -- a transient tmux failure
-// is not evidence of a blocked session, so callers skip alerting that tick
-// and re-classify on the next one.
+// turn (never alerts); a typing pane holds an unsubmitted draft that only
+// its author can resolve (the alert label tells them how); anything else
+// means the unblock attempts are not landing. Null when the pane can't be
+// captured -- a transient tmux failure is not evidence of a blocked
+// session, so callers skip alerting that tick and re-classify on the next.
 export function classifyDeferCause(session: string): DeferCause | null {
   const pane = capturePane(session)
   if (pane == null) return null
-  return detectPaneState(pane) === 'busy' ? 'busy' : 'blocked'
+  const state = detectPaneState(pane)
+  if (state === 'busy') return 'busy'
+  if (state === 'typing') return 'draft'
+  return 'blocked'
 }
 
 const sentAlertKeys = new Set<string>()
@@ -50,6 +56,7 @@ const sentAlertKeys = new Set<string>()
 // "Ok: undefined" in the operator alert if the gate ever changed.
 const CAUSE_LABEL: Record<DeferCause, string> = {
   human: 'emberi kliens aktiv a pane-ben, az injektalas halasztva',
+  draft: 'befejezetlen kezi draft van az input-boxban, kuldd el vagy torold es az uzenet kezbesitodik',
   blocked: 'a session nem fogad promptot (modal vagy ismeretlen pane-allapot)',
   busy: 'a session egy hosszu futo turn-ben dolgozik',
 }
