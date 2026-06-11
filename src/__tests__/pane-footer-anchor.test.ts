@@ -85,6 +85,39 @@ describe('footer bottom-anchoring (quoted-footer regression)', () => {
     expect(shouldClearTruncatedPreamble(STALE_PREAMBLE_BEHIND_QUOTED_FOOTER)).toBe(true)
   })
 
+  it('classifies a modal pane as unknown even when scrollback quotes the footer', () => {
+    // The unknown-gate residual: the old whole-pane IDLE_FOOTER_RX test
+    // passed on the QUOTED line even though the live footer was absent
+    // (resume picker replaced it) -- so the modal pane read 'idle' and the
+    // router would inject into the modal. The live footer must sit in the
+    // bottom region of the pane.
+    // The quoted line sits above the bottom LIVE_FOOTER_REGION (5 lines) --
+    // the realistic shape: scrollback above, the modal occupying the bottom.
+    const modalWithQuote = [
+      '● Watchdog report:',
+      QUOTED_FOOTER_LINE,
+      '  (end of report)',
+      '╭──────────────────────────────────────────╮',
+      '│ Context low. What would you like to do?  │',
+      '│ ❯ 1. Resume from summary (recommended)   │',
+      '│   2. Continue with truncated context     │',
+      '│   3. Start new session                   │',
+      '╰──────────────────────────────────────────╯',
+      '  Enter to confirm',
+    ].join('\n')
+    expect(detectPaneState(modalWithQuote)).toBe('unknown')
+  })
+
+  it('classifies quoted-footer-only output with no live footer as unknown', () => {
+    const noLiveFooter = [
+      '● Here is the fixture:',
+      QUOTED_FOOTER_LINE,
+      '  (six more lines of ordinary output follow)',
+      'line', 'line', 'line', 'line', 'line', 'line',
+    ].join('\n')
+    expect(detectPaneState(noLiveFooter)).toBe('unknown')
+  })
+
   it('control: the same draft WITHOUT a quoted footer is already typing', () => {
     const clean = [
       '● Some ordinary output.',

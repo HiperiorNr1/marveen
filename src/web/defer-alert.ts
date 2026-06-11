@@ -3,9 +3,11 @@ import { notifyChannel } from '../notify.js'
 import { detectPaneState } from '../pane-state.js'
 import { capturePane } from './agent-process.js'
 
-// Operator alert for messages stuck behind a deferral. Two causes qualify:
+// Operator alert for messages stuck behind a deferral. Three causes qualify:
 //   'human'   -- the interference guard keeps deferring because a human
 //                client is active in the target pane;
+//   'draft'   -- an unsubmitted draft sits in the input box; only its
+//                author can resolve it, the label tells them how;
 //   'blocked' -- the session never becomes ready (modal / unknown pane
 //                state) despite the proactive unblock attempts.
 // 'busy' never alerts: a long-running turn is normal operation.

@@ -186,10 +186,7 @@ export function detectsThinkingBlockError(pane: string): boolean {
   const lines = pane.split('\n')
   // Find the footer from the bottom: the live footer is the last line of
   // the pane, so a footer-looking line quoted in scrollback must not win.
-  let footerIdx = -1
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (IDLE_FOOTER_RX.test(lines[i])) { footerIdx = i; break }
-  }
+  const footerIdx = lastFooterIndex(lines)
   if (footerIdx < 0) return false
   const start = Math.max(0, footerIdx - ERROR_LIVE_TAIL_LINES)
   const tail = lines.slice(start, footerIdx)
@@ -247,40 +244,39 @@ export function detectPaneState(
   const footerRegion = paneLines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return 'busy'
 
-  if (!IDLE_FOOTER_RX.test(pane)) return 'unknown'
+  // The LIVE idle footer must sit in the bottom region of the pane (the
+  // same scope the esc-to-interrupt check uses -- Claude Code always
+  // renders it at the bottom). A footer-phrase that only occurs higher up
+  // is a scrollback QUOTE (watchdog report, displayed test fixture): the
+  // live footer is absent, so the surface is a modal / mid-render / not
+  // Claude Code -> 'unknown' and the router defers, instead of the old
+  // whole-pane IDLE_FOOTER_RX test passing on the quote and the box scan
+  // anchoring off the live input box (2026-06-11 draft-merge incident).
+  const footerIdx = lastFooterIndex(paneLines)
+  if (footerIdx < 0 || paneLines.length - footerIdx > LIVE_FOOTER_REGION_LINES) return 'unknown'
 
   if (detectsThinkingBlockError(pane)) return 'error'
 
   if (PENDING_PASTE_RX.test(pane)) return 'busy'
 
-  // Find the input box: two BOX_SEP_RX lines framing the current prompt.
-  // Scan UPWARDS from the footer so we stay inside the live box and
-  // don't pick up historical ❯ lines from scrollback. The footer itself
-  // is anchored from the BOTTOM: the live footer is always the last
-  // matching line, and a quoted footer-phrase higher up in scrollback
-  // (a watchdog report, a displayed test fixture) must not shift the box
-  // scope -- same rule detectsThinkingBlockError applies. Anchoring from
-  // the top made a parked operator draft invisible ('idle' instead of
-  // 'typing') and let the router merge a routed message into the draft
-  // (2026-06-11 incident).
-  const lines = pane.split('\n')
-  const footerIdx = lastFooterIndex(lines)
-  if (footerIdx >= 0) {
-    let bottomSep = -1
-    for (let i = footerIdx - 1; i >= 0; i--) {
-      if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
+  // Find the input box: two BOX_SEP_RX lines framing the current prompt,
+  // scanning UPWARDS from the (bottom-anchored) live footer so we stay
+  // inside the live box and don't pick up historical ❯ lines from
+  // scrollback.
+  let bottomSep = -1
+  for (let i = footerIdx - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(paneLines[i])) { bottomSep = i; break }
+  }
+  let topSep = -1
+  if (bottomSep > 0) {
+    for (let i = bottomSep - 1; i >= 0; i--) {
+      if (BOX_SEP_RX.test(paneLines[i])) { topSep = i; break }
     }
-    let topSep = -1
-    if (bottomSep > 0) {
-      for (let i = bottomSep - 1; i >= 0; i--) {
-        if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
-      }
-    }
-    if (topSep >= 0 && bottomSep > topSep) {
-      const inputLines = lines.slice(topSep + 1, bottomSep)
-      if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
-        return opts.mergeTypingAsBusy ? 'busy' : 'typing'
-      }
+  }
+  if (topSep >= 0 && bottomSep > topSep) {
+    const inputLines = paneLines.slice(topSep + 1, bottomSep)
+    if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
+      return opts.mergeTypingAsBusy ? 'busy' : 'typing'
     }
   }
 
@@ -318,7 +314,9 @@ function lastFooterIndex(lines: string[]): number {
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
   const footerIdx = lastFooterIndex(lines)
-  if (footerIdx < 0) return null
+  // Same bottom-region rule as detectPaneState: a footer-phrase only in
+  // scrollback means the live footer (and so the live box) is absent.
+  if (footerIdx < 0 || lines.length - footerIdx > LIVE_FOOTER_REGION_LINES) return null
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
     if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }

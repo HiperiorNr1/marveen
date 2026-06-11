@@ -144,7 +144,7 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
       logger.warn({ task: task.name, agent: agentName, session }, 'forceSend deferred: unsubmitted draft in target input box, will retry')
       return 'busy'
     }
-    logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check')
+    logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check (draft guard passed)')
   }
 
   try {
