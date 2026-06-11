@@ -34,6 +34,8 @@ import {
   isAgentRunning,
   isSessionReadyForPrompt,
   sendPromptToSession,
+  humanClientActive,
+  tryUnblockSessionModals,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
@@ -104,12 +106,26 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
     return 'missing'
   }
 
+  // Interference guard: a human is typing in the target pane. This applies
+  // even with forceSend -- forceSend bypasses the busy-STATE check (the
+  // Claude session queues the prompt internally), but nothing may type into
+  // an operator's in-progress input. The existing retry table re-fires on
+  // the next 60s tick.
+  if (humanClientActive(session)) {
+    logger.info({ task: task.name, agent: agentName, session }, 'Schedule target pane has an active human client, deferring')
+    return 'busy'
+  }
+
   // When forceSend is true, skip the busy-state check entirely and inject
   // the prompt regardless. The Claude session queues it internally and
   // will process it at the next idle slot. This prevents the infinite
   // retry loop observed when the target session stays busy for hours
   // (275 retries overnight in production).
   if (!task.forceSend && !isSessionReadyForPrompt(session)) {
+    // Proactively dismiss a blocking modal (resume-summary / survey) so the
+    // retry actually converges instead of waiting on a modal that never
+    // clears by itself. Rate-limited internally.
+    tryUnblockSessionModals(session)
     logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session busy or has pending input, will retry')
     return 'busy'
   }

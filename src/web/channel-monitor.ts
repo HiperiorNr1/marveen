@@ -17,6 +17,7 @@ import {
   startAgentProcess,
   stopAgentProcess,
   scheduleIdentitySetup,
+  humanClientActive,
 } from './agent-process.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
@@ -829,7 +830,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       const sig = parked != null && mainPane != null ? stuckInputSignature(mainPane) : null
       const decision = decideStuckInputRecovery(sig, mainStuckInput, Date.now(), MAIN_STUCK_THRESHOLDS)
       mainStuckInput = decision.next
-      if (decision.recover && parked != null) {
+      if (decision.recover && parked != null && humanClientActive(MAIN_CHANNELS_SESSION)) {
+        // Interference guard: the parked-block gate already proves this is a
+        // channel notification (never a human draft), but the recovery Enter /
+        // re-inject keystrokes would still interleave with live typing. Defer;
+        // the state machine re-fires on the next monitor tick.
+        logger.info({ session: MAIN_CHANNELS_SESSION }, 'Stuck-input recovery deferred: human client active on main session')
+      } else if (decision.recover && parked != null) {
         const attempt = decision.next.attempts
         const reinject = attempt > MAIN_STUCK_ENTER_ATTEMPTS && parked.complete && parked.block != null
         if (reinject) {
