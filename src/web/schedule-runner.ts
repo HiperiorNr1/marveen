@@ -31,12 +31,14 @@ import {
 import { listAgentNames, readFileOr } from './agent-config.js'
 import {
   agentSessionName,
+  capturePane,
   isAgentRunning,
   isSessionReadyForPrompt,
   sendPromptToSession,
   humanClientActive,
   tryUnblockSessionModals,
 } from './agent-process.js'
+import { detectPaneState } from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
 
@@ -132,6 +134,16 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   }
 
   if (task.forceSend) {
+    // forceSend bypasses the busy-STATE check, but never an unsubmitted
+    // human draft -- injecting would concatenate the prompt into the draft
+    // and the trailing Enter submits both (the 2026-06-11 draft-merge
+    // incident class). Same precedence Krisztian approved for the
+    // human-guard: nothing writes over human input, not even urgent.
+    const pane = capturePane(session)
+    if (pane != null && detectPaneState(pane) === 'typing') {
+      logger.warn({ task: task.name, agent: agentName, session }, 'forceSend deferred: unsubmitted draft in target input box, will retry')
+      return 'busy'
+    }
     logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check')
   }
 
