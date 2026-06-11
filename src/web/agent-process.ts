@@ -9,7 +9,7 @@ import {
   detectPaneState,
   decideSubmitFollowup,
   shouldClearTruncatedPreamble,
-  detectBlockingModal,
+  modalDismissTarget,
   shouldDeferForHumanClient,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
@@ -309,7 +309,7 @@ export function humanClientActive(session: string): boolean {
 // every scheduled prompt + agent message until a human dismisses it. We strip
 // it by sending "0" (Dismiss) when the marker is visible, so any caller
 // writing a prompt has a clear input field. Modal markers live in
-// pane-state.ts (detectBlockingModal) so the worker loops share them.
+// pane-state.ts (modalDismissTarget) so the worker loops share them.
 
 function dismissSurveyModalIfPresent(session: string): void {
   try {
@@ -318,7 +318,7 @@ function dismissSurveyModalIfPresent(session: string): void {
       return
     }
     const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
-    if (detectBlockingModal(pane) !== 'survey') return
+    if (modalDismissTarget(pane) !== 'survey') return
     execFileSync(TMUX, ['send-keys', '-t', session, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
     // the prompt input, not the now-stale modal handler.
@@ -342,7 +342,7 @@ export function dismissResumeSummaryModalIfPresent(session: string): void {
       return
     }
     const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
-    if (detectBlockingModal(pane) !== 'resume-summary') return
+    if (modalDismissTarget(pane) !== 'resume-summary') return
     execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
     execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
@@ -375,7 +375,10 @@ export function tryUnblockSessionModals(session: string): void {
   modalUnblockLastProbe.set(session, now)
   const pane = capturePane(session)
   if (pane == null) return
-  const modal = detectBlockingModal(pane)
+  // modalDismissTarget pairs the marker with the pane state a GENUINE modal
+  // produces, so marker text inside a working agent's visible output (busy
+  // or idle pane) never triggers stray keystrokes into a live session.
+  const modal = modalDismissTarget(pane)
   if (modal == null) return
   logger.info({ session, modal }, 'Blocking modal detected on not-ready session -- attempting proactive dismiss')
   if (modal === 'survey') dismissSurveyModalIfPresent(session)

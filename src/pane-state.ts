@@ -1123,3 +1123,23 @@ export function shouldDeferForHumanClient(
     ts => Number.isFinite(ts) && nowEpoch - ts <= windowS,
   )
 }
+
+// Decide whether a proactive dismiss may fire for the pane. The marker text
+// alone is NOT enough: a working agent can have the literal phrase in its
+// visible output (these very agents discuss this feature), and capture-pane
+// shows whatever is on screen -- detectBlockingModal would then report a
+// modal on a busy/idle pane and the dismiss would inject keystrokes into a
+// live session, the same interference class the human-guard exists to
+// prevent, just against an agent. A GENUINE modal has a characteristic pane
+// state: the resume picker replaces the idle footer ('unknown'), the survey
+// keeps it ('idle'). Any other pairing means the marker is output, not a
+// live modal. Tradeoff: a lingering busy-indicator above a real modal
+// defers the dismiss to a later probe instead of risking keys into a turn.
+export function modalDismissTarget(pane: string): BlockingModal | null {
+  const modal = detectBlockingModal(pane)
+  if (modal == null) return null
+  const state = detectPaneState(pane)
+  if (modal === 'resume-summary' && state === 'unknown') return modal
+  if (modal === 'survey' && state === 'idle') return modal
+  return null
+}

@@ -110,7 +110,8 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   // even with forceSend -- forceSend bypasses the busy-STATE check (the
   // Claude session queues the prompt internally), but nothing may type into
   // an operator's in-progress input. The existing retry table re-fires on
-  // the next 60s tick.
+  // the next 60s tick. No defer-alert here by design: scheduled tasks have
+  // no human waiting on a reply, the retry table is their safety net.
   if (humanClientActive(session)) {
     logger.info({ task: task.name, agent: agentName, session }, 'Schedule target pane has an active human client, deferring')
     return 'busy'
