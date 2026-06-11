@@ -1070,3 +1070,56 @@ export function decideStuckToolCallRecovery(
     next: { ...prev, lastSeconds: sig.seconds, stagnantPolls: nextStagnant, stagnantSince: nextStagnantSince, attempts: 1 },
   }
 }
+
+// ---------------------------------------------------------------------------
+// Blocking-modal detection + human-client deferral (pure layer).
+//
+// Two Claude Code modals can park a session so that no injected prompt ever
+// lands:
+//   - the optional session-rating survey ("How is Claude doing this
+//     session?"): the idle footer stays visible so detectPaneState() says
+//     'idle', but the modal swallows the next keystroke;
+//   - the post-compaction / large --continue "Resume from summary" picker:
+//     its footer replaces the idle footer, detectPaneState() returns
+//     'unknown', and isSessionReadyForPrompt() refuses delivery forever.
+//
+// Historically the dismiss logic ran only on the OUTBOUND path
+// (sendPromptToSession pre-flight) and on restart paths -- a session blocked
+// mid-life never received a dismiss, so pending inter-agent / channel
+// messages piled up indefinitely (observed: 13h delivery stall). The worker
+// loops now probe with detectBlockingModal() and dismiss proactively.
+// The regexes are the single source of truth; agent-process.ts imports this.
+
+export type BlockingModal = 'survey' | 'resume-summary'
+
+const SURVEY_MODAL_RX = /How is Claude doing this session/
+const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
+
+// Resume-summary wins when both match: it is the one that blocks readiness
+// outright, and if its picker is on screen a survey-dismiss '0' would land
+// in the wrong handler.
+export function detectBlockingModal(pane: string): BlockingModal | null {
+  if (!pane || !pane.trim()) return null
+  if (RESUME_SUMMARY_MODAL_RX.test(pane)) return 'resume-summary'
+  if (SURVEY_MODAL_RX.test(pane)) return 'survey'
+  return null
+}
+
+// Should an injection (prompt, modal-dismiss, identity command, recovery
+// Enter) be deferred because a human is interacting with the pane?
+//
+// Input is the list of `#{client_activity}` epochs from
+// `tmux list-clients -t <session>` -- one entry per attached client.
+// Activity only updates on client INPUT (keystrokes, scroll), not on
+// passive viewing, so an operator who leaves a pane attached to watch it
+// does NOT starve delivery; only recent typing defers. windowS=Infinity
+// degrades to strict attached-only semantics if ever needed.
+export function shouldDeferForHumanClient(
+  clientActivityEpochs: number[],
+  nowEpoch: number,
+  windowS: number,
+): boolean {
+  return clientActivityEpochs.some(
+    ts => Number.isFinite(ts) && nowEpoch - ts <= windowS,
+  )
+}
