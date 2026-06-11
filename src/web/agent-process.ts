@@ -9,6 +9,8 @@ import {
   detectPaneState,
   decideSubmitFollowup,
   shouldClearTruncatedPreamble,
+  detectBlockingModal,
+  shouldDeferForHumanClient,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
 import { parseTelegramToken } from './telegram.js'
@@ -267,19 +269,56 @@ export function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}
   return startAgentProcess(name, opts)
 }
 
+// Human-interference guard. Before ANY synthetic keystroke (prompt chunks,
+// modal-dismiss digits, identity slash commands, recovery Enters) we check
+// whether a human client is attached to the target session AND showed input
+// activity inside the window. tmux only bumps #{client_activity} on client
+// INPUT, so an operator passively watching a pane does not defer delivery --
+// only recent typing does. The observed failure without this: worker-injected
+// '0'/'1' digits landing mid-word in the operator's own draft.
+//
+// Fail-open: a tmux error (no server, vanished session) reports NOT active,
+// because erring toward deferral would starve delivery on every transient
+// tmux hiccup -- and the downstream isSessionReadyForPrompt() still guards
+// the actual send.
+const HUMAN_ACTIVITY_WINDOW_S = 120
+
+export function humanClientActive(session: string): boolean {
+  try {
+    // `=` prefix forces exact session-name match (plain -t prefix-matches,
+    // so agent-kel would also hit agent-kelvin).
+    const out = execFileSync(
+      TMUX,
+      ['list-clients', '-t', `=${session}`, '-F', '#{client_activity}'],
+      { timeout: 3000, encoding: 'utf-8' },
+    )
+    const epochs = out
+      .split('\n')
+      .map(l => parseInt(l.trim(), 10))
+      .filter(n => Number.isFinite(n))
+    return shouldDeferForHumanClient(epochs, Math.floor(Date.now() / 1000), HUMAN_ACTIVITY_WINDOW_S)
+  } catch {
+    return false
+  }
+}
+
 // Claude Code occasionally pops a "How is Claude doing this session? (optional)"
 // rating modal above the prompt input. The footer line still reads
 // "bypass permissions on (shift+tab to cycle)" so detectPaneState() classifies
 // the pane as idle, but the modal swallows the next keystroke and pinches off
 // every scheduled prompt + agent message until a human dismisses it. We strip
-// it pre-flight by sending "0" (Dismiss) when the marker is visible, so any
-// caller writing a prompt has a clear input field.
-const SURVEY_MODAL_RX = /How is Claude doing this session/
+// it by sending "0" (Dismiss) when the marker is visible, so any caller
+// writing a prompt has a clear input field. Modal markers live in
+// pane-state.ts (detectBlockingModal) so the worker loops share them.
 
 function dismissSurveyModalIfPresent(session: string): void {
   try {
+    if (humanClientActive(session)) {
+      logger.info({ session }, 'Survey-modal dismiss deferred: human client active')
+      return
+    }
     const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
-    if (!SURVEY_MODAL_RX.test(pane)) return
+    if (detectBlockingModal(pane) !== 'survey') return
     execFileSync(TMUX, ['send-keys', '-t', session, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
     // the prompt input, not the now-stale modal handler.
@@ -294,14 +333,16 @@ function dismissSurveyModalIfPresent(session: string): void {
 // summary" modal with three numbered options and footer "Enter to confirm".
 // detectPaneState() reads that footer as 'unknown' (not the usual "bypass
 // permissions" string), so isSessionReadyForPrompt() refuses to deliver and
-// every scheduled task / inter-agent message piles up behind it. Pre-flight
-// pick option 1 (Resume from summary, recommended) and Enter to confirm.
-const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
-
+// every scheduled task / inter-agent message piles up behind it. Pick option 1
+// (Resume from summary, recommended) and Enter to confirm.
 export function dismissResumeSummaryModalIfPresent(session: string): void {
   try {
+    if (humanClientActive(session)) {
+      logger.info({ session }, 'Resume-modal dismiss deferred: human client active')
+      return
+    }
     const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
-    if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
+    if (detectBlockingModal(pane) !== 'resume-summary') return
     execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
     execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
@@ -312,6 +353,33 @@ export function dismissResumeSummaryModalIfPresent(session: string): void {
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/dismiss resume-from-summary modal')
   }
+}
+
+// Proactive unblock for the worker loops (message-router, schedule-runner,
+// synochat-worker). Historically the dismiss helpers above only ran on the
+// outbound path (sendPromptToSession pre-flight) and on restart -- but a
+// blocked session never becomes ready, so delivery loops skipped it forever
+// and the dismiss never fired (observed: 13h inbound stall behind a
+// resume-summary modal). Loops call this from their not-ready branch; the
+// next tick delivers once the modal is gone.
+//
+// Probe rate-limit: one capture-pane probe per session per interval, so N
+// stuck messages to the same session cost one probe, not N per tick.
+const MODAL_UNBLOCK_MIN_INTERVAL_MS = 30_000
+const modalUnblockLastProbe = new Map<string, number>()
+
+export function tryUnblockSessionModals(session: string): void {
+  const now = Date.now()
+  const last = modalUnblockLastProbe.get(session) ?? 0
+  if (now - last < MODAL_UNBLOCK_MIN_INTERVAL_MS) return
+  modalUnblockLastProbe.set(session, now)
+  const pane = capturePane(session)
+  if (pane == null) return
+  const modal = detectBlockingModal(pane)
+  if (modal == null) return
+  logger.info({ session, modal }, 'Blocking modal detected on not-ready session -- attempting proactive dismiss')
+  if (modal === 'survey') dismissSurveyModalIfPresent(session)
+  else dismissResumeSummaryModalIfPresent(session)
 }
 
 // Post-(re)start identity setup. Every freshly spawned Claude Code session is
@@ -328,6 +396,32 @@ export function identitySlashCommands(displayName: string): string[] {
 // reliably ready ~5s after that.
 const MODAL_DISMISS_DELAY_MS = 8000
 const IDENTITY_SEND_DELAY_MS = 5000
+// When a human client is active right after a (re)start (typically the
+// operator restarting by hand and watching), the /name injection defers and
+// retries on a bounded budget instead of typing into their input.
+const IDENTITY_DEFER_RETRY_MS = 60_000
+const IDENTITY_DEFER_MAX_RETRIES = 5
+
+function sendIdentityCommands(session: string, displayName: string, attempt: number): void {
+  if (humanClientActive(session)) {
+    if (attempt >= IDENTITY_DEFER_MAX_RETRIES) {
+      logger.warn({ session, displayName }, 'Identity setup abandoned: human client stayed active through the retry budget')
+      return
+    }
+    logger.info({ session, attempt }, 'Identity setup deferred: human client active')
+    setTimeout(() => sendIdentityCommands(session, displayName, attempt + 1), IDENTITY_DEFER_RETRY_MS)
+    return
+  }
+  try {
+    for (const cmd of identitySlashCommands(displayName)) {
+      execFileSync(TMUX, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
+      execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
+    }
+    logger.info({ session, displayName }, 'Set session /name')
+  } catch (err) {
+    logger.warn({ err, session, displayName }, 'Failed to set session /name')
+  }
+}
 
 // Schedule the identity setup for a freshly (re)spawned session: once it has
 // had time to render, dismiss any first-run/resume modals, then send `/name`.
@@ -343,17 +437,7 @@ export function scheduleIdentitySetup(session: string, displayName: string): voi
     } catch (err) {
       logger.warn({ err, session }, 'Post-restart modal dismiss failed')
     }
-    setTimeout(() => {
-      try {
-        for (const cmd of identitySlashCommands(displayName)) {
-          execFileSync(TMUX, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
-          execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
-        }
-        logger.info({ session, displayName }, 'Set session /name')
-      } catch (err) {
-        logger.warn({ err, session, displayName }, 'Failed to set session /name')
-      }
-    }, IDENTITY_SEND_DELAY_MS)
+    setTimeout(() => sendIdentityCommands(session, displayName, 0), IDENTITY_SEND_DELAY_MS)
   }, MODAL_DISMISS_DELAY_MS)
 }
 
