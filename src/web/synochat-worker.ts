@@ -4,7 +4,14 @@ import { existsSync } from 'node:fs'
 import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
 import { logger } from '../logger.js'
 import { wrapUntrusted, UNTRUSTED_PREAMBLE } from '../prompt-safety.js'
-import { sendPromptToSession, isSessionReadyForPrompt, agentSessionName } from './agent-process.js'
+import {
+  sendPromptToSession,
+  isSessionReadyForPrompt,
+  agentSessionName,
+  humanClientActive,
+  tryUnblockSessionModals,
+} from './agent-process.js'
+import { maybeSendDeferAlert, clearDeferAlert, classifyDeferCause, DEFER_ALERT_AFTER_MS } from './defer-alert.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { getSecret } from './vault.js'
 
@@ -84,7 +91,7 @@ function pollOnce(): void {
     db.pragma('busy_timeout = 5000')
     const pending = db
       .prepare(
-        `SELECT id, user_id, username, channel_id, text, post_id, thread_id, agent
+        `SELECT id, user_id, username, channel_id, text, post_id, thread_id, agent, received_at
          FROM incoming_messages WHERE status='pending'
          ORDER BY id ASC LIMIT ?`,
       )
@@ -97,6 +104,7 @@ function pollOnce(): void {
         post_id: string | null
         thread_id: string | null
         agent: string | null
+        received_at: number
       }>
 
     for (const msg of pending) {
@@ -104,10 +112,41 @@ function pollOnce(): void {
       // ingest based on the bot-token map (Phase-2). Unstamped legacy rows
       // (agent=NULL) fall back to MAIN_CHANNELS_SESSION (Phase-1 behaviour).
       const targetSession = resolveSessionForAgent(msg.agent)
+      const ageMs = Date.now() - msg.received_at * 1000
+      // Interference guard: a human is typing in the target pane -- defer,
+      // the row stays pending and the next 5s tick retries.
+      if (humanClientActive(targetSession)) {
+        maybeSendDeferAlert({
+          key: `synochat-${msg.id}`,
+          ageMs,
+          cause: 'human',
+          session: targetSession,
+          what: `SynoChat uzenet (#${msg.id}, ${msg.username || 'ismeretlen'})`,
+        })
+        continue
+      }
       // Skip if the target session is not ready -- leave the row pending
       // and retry next tick. Single-agent Phase-1 flow used the same posture
-      // against MAIN_CHANNELS_SESSION; now it applies per row.
-      if (!isSessionReadyForPrompt(targetSession)) continue
+      // against MAIN_CHANNELS_SESSION; now it applies per row. A blocking
+      // modal never clears on its own, so probe + dismiss it here
+      // (rate-limited internally); past the alert threshold classify the
+      // cause and notify the operator once per stuck row.
+      if (!isSessionReadyForPrompt(targetSession)) {
+        tryUnblockSessionModals(targetSession)
+        if (ageMs > DEFER_ALERT_AFTER_MS) {
+          const cause = classifyDeferCause(targetSession)
+          if (cause != null) {
+            maybeSendDeferAlert({
+              key: `synochat-${msg.id}`,
+              ageMs,
+              cause,
+              session: targetSession,
+              what: `SynoChat uzenet (#${msg.id}, ${msg.username || 'ismeretlen'})`,
+            })
+          }
+        }
+        continue
+      }
       // SynoChat input is external (a colleague typed it) -> untrusted.
       const wrapped = wrapUntrusted(`synology-chat:user-${msg.user_id}`, msg.text)
       // Thread target: if the colleague already wrote inside a thread, reuse it;
@@ -128,6 +167,7 @@ function pollOnce(): void {
         db.prepare(
           "UPDATE incoming_messages SET status='delivered', delivered_at=strftime('%s','now') WHERE id=?",
         ).run(msg.id)
+        clearDeferAlert(`synochat-${msg.id}`)
         logger.info(
           { id: msg.id, user: msg.user_id, agent: msg.agent ?? '(default)', session: targetSession },
           'SynoChat message delivered to agent',
@@ -154,6 +194,7 @@ function pollOnce(): void {
         db.prepare(
           "UPDATE incoming_messages SET status='failed', failed_at=strftime('%s','now'), last_error=? WHERE id=?",
         ).run(errMsg, msg.id)
+        clearDeferAlert(`synochat-${msg.id}`)
         logger.warn({ err: errMsg, id: msg.id, session: targetSession }, 'SynoChat delivery to agent failed')
       }
     }

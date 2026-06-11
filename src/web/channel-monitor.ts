@@ -17,6 +17,7 @@ import {
   startAgentProcess,
   stopAgentProcess,
   scheduleIdentitySetup,
+  humanClientActive,
 } from './agent-process.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
@@ -830,25 +831,33 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       const decision = decideStuckInputRecovery(sig, mainStuckInput, Date.now(), MAIN_STUCK_THRESHOLDS)
       mainStuckInput = decision.next
       if (decision.recover && parked != null) {
-        const attempt = decision.next.attempts
-        const reinject = attempt > MAIN_STUCK_ENTER_ATTEMPTS && parked.complete && parked.block != null
-        if (reinject) {
-          logger.warn({ session: MAIN_CHANNELS_SESSION, chatId: parked.chatId, attempt }, 'Stuck channel input -- escalating to clear + verbatim re-inject')
-          try {
-            clearInputBuffer(MAIN_CHANNELS_SESSION)
-            sendPromptToSession(MAIN_CHANNELS_SESSION, parked.block!)
-          } catch (err) {
-            logger.warn({ err, session: MAIN_CHANNELS_SESSION }, 'Stuck-input re-inject failed')
-          }
+        // Interference guard: the parked-block gate already proves this is a
+        // channel notification (never a human draft), but the recovery Enter /
+        // re-inject keystrokes would still interleave with live typing. Defer;
+        // the state machine re-fires on the next monitor tick.
+        if (humanClientActive(MAIN_CHANNELS_SESSION)) {
+          logger.info({ session: MAIN_CHANNELS_SESSION }, 'Stuck-input recovery deferred: human client active on main session')
         } else {
-          // Enter-first, and the truncation-guard fallback: if escalation was
-          // due but the block looks incomplete, hold on Enter instead.
-          const heldForTruncation = attempt > MAIN_STUCK_ENTER_ATTEMPTS && !parked.complete
-          logger.warn({ session: MAIN_CHANNELS_SESSION, attempt, heldForTruncation }, 'Stuck channel input -- recovery Enter')
-          try {
-            execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, 'Enter'], { timeout: 5000 })
-          } catch (err) {
-            logger.warn({ err, session: MAIN_CHANNELS_SESSION }, 'Stuck-input recovery Enter failed')
+          const attempt = decision.next.attempts
+          const reinject = attempt > MAIN_STUCK_ENTER_ATTEMPTS && parked.complete && parked.block != null
+          if (reinject) {
+            logger.warn({ session: MAIN_CHANNELS_SESSION, chatId: parked.chatId, attempt }, 'Stuck channel input -- escalating to clear + verbatim re-inject')
+            try {
+              clearInputBuffer(MAIN_CHANNELS_SESSION)
+              sendPromptToSession(MAIN_CHANNELS_SESSION, parked.block!)
+            } catch (err) {
+              logger.warn({ err, session: MAIN_CHANNELS_SESSION }, 'Stuck-input re-inject failed')
+            }
+          } else {
+            // Enter-first, and the truncation-guard fallback: if escalation was
+            // due but the block looks incomplete, hold on Enter instead.
+            const heldForTruncation = attempt > MAIN_STUCK_ENTER_ATTEMPTS && !parked.complete
+            logger.warn({ session: MAIN_CHANNELS_SESSION, attempt, heldForTruncation }, 'Stuck channel input -- recovery Enter')
+            try {
+              execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, 'Enter'], { timeout: 5000 })
+            } catch (err) {
+              logger.warn({ err, session: MAIN_CHANNELS_SESSION }, 'Stuck-input recovery Enter failed')
+            }
           }
         }
       }
