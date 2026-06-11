@@ -255,9 +255,16 @@ export function detectPaneState(
 
   // Find the input box: two BOX_SEP_RX lines framing the current prompt.
   // Scan UPWARDS from the footer so we stay inside the live box and
-  // don't pick up historical ❯ lines from scrollback.
+  // don't pick up historical ❯ lines from scrollback. The footer itself
+  // is anchored from the BOTTOM: the live footer is always the last
+  // matching line, and a quoted footer-phrase higher up in scrollback
+  // (a watchdog report, a displayed test fixture) must not shift the box
+  // scope -- same rule detectsThinkingBlockError applies. Anchoring from
+  // the top made a parked operator draft invisible ('idle' instead of
+  // 'typing') and let the router merge a routed message into the draft
+  // (2026-06-11 incident).
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = lastFooterIndex(lines)
   if (footerIdx >= 0) {
     let bottomSep = -1
     for (let i = footerIdx - 1; i >= 0; i--) {
@@ -289,6 +296,17 @@ export function isReadyForPrompt(pane: string): boolean {
   return detectPaneState(pane) === 'idle'
 }
 
+// Bottom-anchored idle-footer lookup: the live footer is always the
+// LAST matching line of the pane. A top-anchored findIndex would latch
+// onto a quoted footer-phrase in scrollback and shift every box-scoped
+// detector off the live input box.
+function lastFooterIndex(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (IDLE_FOOTER_RX.test(lines[i])) return i
+  }
+  return -1
+}
+
 // Locate the live Claude Code input box and return its inner content as
 // one string. Bounded strictly to the region between the two most
 // recent BOX_SEP_RX separators above the idle footer, so a parked input
@@ -299,7 +317,7 @@ export function isReadyForPrompt(pane: string): boolean {
 // "not enough signal to act, do nothing".
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = lastFooterIndex(lines)
   if (footerIdx < 0) return null
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
