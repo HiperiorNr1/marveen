@@ -5,6 +5,7 @@ import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
 import { loadOrCreateDashboardToken, checkBearerToken } from './web/dashboard-auth.js'
 import { json } from './web/http-helpers.js'
+import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
@@ -22,6 +23,7 @@ import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
 import { tryHandleAgentTerminal } from './web/routes/agent-terminal.js'
+import { tryHandleAgentConversation } from './web/routes/agent-conversation.js'
 import { tryHandleAgentTaskState } from './web/routes/agent-taskstate.js'
 import { sweepOrphanTaskStates } from './web/agent-taskstate.js'
 import { tryHandleDailyLog } from './web/routes/daily-log.js'
@@ -122,6 +124,15 @@ export function startWebServer(port = 3420): http.Server {
       }
     }
 
+    // The mobile-login QR needs a URL the phone can actually reach. When the
+    // desktop opens the dashboard on localhost, window.location.origin is
+    // useless (the phone would hit its OWN localhost), so the client asks the
+    // server for its LAN IP and builds the QR from that. Auth is already
+    // enforced by the /api/* gate above.
+    if (path === '/api/network-info' && method === 'GET') {
+      return json(res, { lan_ip: detectLanIp(), port })
+    }
+
     try {
       const routeCtx: RouteContext = { req, res, path, method, url }
 
@@ -138,6 +149,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAgentsSkills(routeCtx)) return
       if (await tryHandleSkills(routeCtx)) return
       if (await tryHandleAgentTerminal(routeCtx)) return
+      if (await tryHandleAgentConversation(routeCtx)) return
       if (await tryHandleAgentTaskState(routeCtx)) return
       if (await tryHandleAgents(routeCtx, WEB_DIR)) return
       if (await tryHandleMarveen(routeCtx, WEB_DIR)) return

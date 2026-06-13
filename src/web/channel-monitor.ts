@@ -22,7 +22,7 @@ import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import {
-  detectPaneState, decidePaneErrorAlert, type PaneErrorAlertState, type PaneState,
+  detectPaneState, decidePaneErrorAlert, detectsBlockingMenu, type PaneErrorAlertState, type PaneState,
   stuckInputSignature, decideStuckInputRecovery, parkedChannelInput,
   parkedInputText, shouldClearTruncatedPreamble,
   type StuckInputState, type StuckInputThresholds,
@@ -67,7 +67,16 @@ function resolveAgentProvider(name: string): ChannelProviderType {
 
 const agentDownSince: Map<string, number> = new Map()
 const agentLastRestart: Map<string, number> = new Map()
+// Consecutive watchdog restarts (keyed by agent name) that did NOT bring the
+// plugin back up. Drives exponential back-off so a plugin that crashes on every
+// launch (e.g. a broken third-party channel plugin) is not restarted on a fixed
+// short cadence forever -- which restarts the WHOLE agent every few minutes and
+// renders it unusable. Reset to 0 the moment the plugin is seen alive again.
+const agentRestartFailures: Map<string, number> = new Map()
 const AGENT_RESTART_GRACE_MS = 90_000
+// Floor frequency for the backed-off restart: even a long-down plugin is still
+// retried at least this often, in case an external fix brings it back.
+const AGENT_MAX_RESTART_GRACE_MS = 60 * 60 * 1000 // 1h
 // A freshly started agent can take well over the first-probe window to bring
 // its channel plugin up (a large-context model launched with --continue spawns
 // the plugin only after a slow session load). Never restart a process younger
@@ -118,7 +127,7 @@ const MAIN_STUCK_THRESHOLDS: StuckInputThresholds = {
 //      (e.g. an inter-agent notification) -> clear + re-inject the collapsed
 //      text. A sub-agent's input box never holds a human draft, so this is
 //      safe; the main session stays conservative (Enter / <channel>-only).
-function recoverStuckInputForSession(
+export function recoverStuckInputForSession(
   session: string,
   prev: StuckInputState,
   thresholds: StuckInputThresholds,
@@ -208,6 +217,19 @@ const paneErrorState: Map<string, PaneErrorAlertState> = new Map()
 const PANE_ERROR_CONFIRM_MS = 120_000
 const PANE_ERROR_DEDUP_MS = 30 * 60 * 1000
 const PANE_ERROR_CLEAR_MS = 5 * 60 * 1000
+
+// Per-session tracking for a session parked in a blocking interactive menu
+// (the /mcp manager, a model/config picker, a permission dialog). Unlike the
+// thinking-block error this IS auto-recovered: a single Escape pops the modal
+// without touching the conversation, so it is non-destructive. Reuses the
+// decidePaneErrorAlert state machine (treat its `alert` as "recover now") so a
+// one-tick transient never fires and the Escape is not re-sent every tick.
+// confirmMs keeps it to ~2 ticks (~1-2 min) before recovering; dedupMs throttles
+// retries if the Escape did not take; clearMs survives brief capture blips.
+const paneMenuState: Map<string, PaneErrorAlertState> = new Map()
+const MENU_RECOVER_CONFIRM_MS = 45_000
+const MENU_RECOVER_DEDUP_MS = 5 * 60 * 1000
+const MENU_RECOVER_CLEAR_MS = 2 * 60 * 1000
 
 type MarveenRecoveryStage = 'soft' | 'save' | 'resume' | 'hard' | 'gave_up'
 interface MarveenDownState {
@@ -732,7 +754,7 @@ function checkMainKeepaliveStaleness(): void {
   }
 }
 
-function sendAlert(text: string): void {
+export function sendAlert(text: string): void {
   notifyChannel(text).catch(() => {})
 }
 
@@ -913,6 +935,41 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       }
     }
 
+    // Blocking-menu recovery (main + sub-agents). A session parked in an
+    // interactive modal (/mcp manager, model/config picker, permission dialog)
+    // is neither busy nor idle, so detectPaneState reads 'unknown' and the
+    // scheduler/router silently skip it -- the session goes deaf with nothing
+    // alerting (observed: main session sat in /mcp ~6h). A single Escape pops
+    // the modal back to the prompt without touching the conversation, so unlike
+    // the thinking-block error this is safe to auto-recover. Same debounce
+    // machine as the error pass (alert == "recover now") so a one-tick frame
+    // never fires and the Escape is not re-sent every tick.
+    for (const t of targets) {
+      const pane = capturePane(t.session)
+      const inMenu = pane != null && detectsBlockingMenu(pane)
+      const prev = paneMenuState.get(t.session) ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
+      const decision = decidePaneErrorAlert(inMenu, prev, Date.now(), {
+        confirmMs: MENU_RECOVER_CONFIRM_MS,
+        dedupMs: MENU_RECOVER_DEDUP_MS,
+        clearMs: MENU_RECOVER_CLEAR_MS,
+      })
+      if (decision.next.firstSeenAt === null) {
+        paneMenuState.delete(t.session)
+      } else {
+        paneMenuState.set(t.session, decision.next)
+      }
+      if (decision.alert) {
+        const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
+        logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
+        try {
+          execFileSync(TMUX, ['send-keys', '-t', t.session, 'Escape'], { timeout: 5000 })
+        } catch (err) {
+          logger.warn({ err, session: t.session }, 'Menu-recovery Escape failed')
+        }
+        sendAlert(`⌨️ A(z) ${label} session beragadt egy interaktiv menube (pl. /mcp) es nem dolgozott fel uzeneteket. Kikuldtem egy Escape-et, visszateritettem a prompthoz. Ha ismetlodik: tmux attach -t ${t.session}`)
+      }
+    }
+
     // Stuck channel-input recovery (main + sub-agents). Recover a channel
     // notification stranded at the ❯ prompt by getting it SUBMITTED. The gate
     // (parkedChannelInput != null) fires ONLY for a parked <channel> block, so
@@ -967,9 +1024,14 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // Process-alive does NOT prove the inbound MCP pipe is healthy (the
           // deafness blind spot). Cross-check the keep-alive freshness.
           checkMainKeepaliveStaleness()
-        } else if (agentDownSince.has(t.session)) {
-          logger.info({ session: t.session, provider: t.provider }, 'Agent channel plugin recovered')
-          agentDownSince.delete(t.session)
+        } else {
+          if (agentDownSince.has(t.session)) {
+            logger.info({ session: t.session, provider: t.provider }, 'Agent channel plugin recovered')
+            agentDownSince.delete(t.session)
+          }
+          // Healthy observation clears the exponential back-off so the next
+          // down-spell starts again at the base grace.
+          agentRestartFailures.delete(t.agentName!)
         }
         continue
       }
@@ -978,14 +1040,17 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       } else {
         if (!agentDownSince.has(t.session)) agentDownSince.set(t.session, Date.now())
         const lastRestart = agentLastRestart.get(t.agentName!)
+        const failures = agentRestartFailures.get(t.agentName!) ?? 0
         const restart = shouldAutoRestartDownAgent({
           processAgeMs: getProcessAgeMs(claudePid),
           msSinceLastRestart: lastRestart != null ? Date.now() - lastRestart : null,
           startupGraceMs: AGENT_STARTUP_GRACE_MS,
           restartGraceMs: AGENT_RESTART_GRACE_MS,
+          consecutiveFailures: failures,
+          maxRestartGraceMs: AGENT_MAX_RESTART_GRACE_MS,
         })
         if (!restart) {
-          logger.debug({ agent: t.agentName, provider: t.provider }, 'Channel plugin probe reports down but agent is within startup/restart grace -- deferring')
+          logger.debug({ agent: t.agentName, provider: t.provider, failures }, 'Channel plugin probe reports down but agent is within startup/restart back-off -- deferring')
           continue
         }
         const agentProvider = resolveAgentProvider(t.agentName!)
@@ -995,13 +1060,17 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           logger.warn({ agent: t.agentName, provider: agentProvider }, 'Agent has no channel token in state dir -- skipping restart to avoid token conflict')
           continue
         }
-        logger.warn({ agent: t.agentName, provider: t.provider }, 'Agent channel plugin down -- auto-restarting')
+        logger.warn({ agent: t.agentName, provider: t.provider, failures }, 'Agent channel plugin down -- auto-restarting')
         try {
           stopAgentProcess(t.agentName!)
           execSync('sleep 2', { timeout: 4000 })
           startAgentProcess(t.agentName!)
           agentLastRestart.set(t.agentName!, Date.now())
           agentDownSince.delete(t.session)
+          // Count this restart as failed until a later sweep sees the plugin
+          // alive (which resets the counter). Repeated failures back off the
+          // next restart exponentially instead of churning every base-grace.
+          agentRestartFailures.set(t.agentName!, failures + 1)
         } catch (err) {
           logger.error({ err, agent: t.agentName }, 'Failed to auto-restart agent after channel plugin down')
         }

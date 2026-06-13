@@ -1576,6 +1576,10 @@ function renderAgents() {
         <span class="tg-status" title="Online: a fő asszisztens csatornáját a --channels session kezeli, ezért fixen online (nincs külön token-ellenőrzés)."><span class="tg-dot connected"></span>Online</span>
       </div>
       <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact agent-conversation-btn" title="Beszélgetés">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Beszélgetés
+        </button>
         <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
           Terminal
@@ -1584,6 +1588,9 @@ function renderAgents() {
     `
     mCard.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
       e.stopPropagation(); openTerminalModal(mainAgentId())
+    })
+    mCard.querySelector('.agent-conversation-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openConversationModal(mainAgentId(), 'Marveen Főnök')
     })
     mCard.addEventListener('click', () => openMarveenDetail())
     agentsGrid.insertBefore(mCard, addBtn)
@@ -1630,6 +1637,10 @@ function renderAgents() {
           <button class="btn-danger btn-compact agent-login-btn" data-phase="start">Bejelentkezés</button>
         </div>` : ''}
       <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact agent-conversation-btn" title="Beszélgetés">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Beszélgetés
+        </button>
         <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
           Terminal
@@ -1643,6 +1654,10 @@ function renderAgents() {
     // Terminal button
     card.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
       e.stopPropagation(); openTerminalModal(agent.name)
+    })
+    // Conversation (readable transcript) button
+    card.querySelector('.agent-conversation-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openConversationModal(agent.name, label)
     })
     card.addEventListener('click', () => openAgentDetail(agent.name))
     // Only running agents have a live session to look at, so only they get the
@@ -2224,6 +2239,89 @@ document.getElementById('saveModelBtn').addEventListener('click', async () => {
     }
     startModelRestartPolling(name, newModel, triggeredAt)
   } catch { showToast('Hiba a mentés során') }
+})
+
+document.getElementById('modelSuggestBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const resultDiv = document.getElementById('modelSuggestionResult')
+  resultDiv.style.display = 'block'
+  resultDiv.textContent = 'Elemzés...'
+  try {
+    const res = await fetch('/api/agents/model-suggest', { method: 'POST' })
+    if (!res.ok) throw new Error()
+    const { results } = await res.json()
+    const entry = results.find(r => r.agent === currentAgent.name)
+    if (!entry) {
+      resultDiv.textContent = 'Nincs adat ehhez az ágenshez.'
+      return
+    }
+    resultDiv.style.color = entry.changeAdvised ? 'var(--warning, #e6a817)' : 'var(--success)'
+    resultDiv.style.whiteSpace = 'pre-wrap'
+    resultDiv.style.fontFamily = 'monospace'
+    resultDiv.style.fontSize = '12px'
+    resultDiv.textContent = entry.reason
+  } catch { resultDiv.textContent = 'Hiba az elemzés során.' }
+})
+
+document.getElementById('analyzeAllModelsBtn').addEventListener('click', async () => {
+  const panel = document.getElementById('agentsModelAnalysis')
+  panel.style.display = 'block'
+  panel.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Elemzés folyamatban...</p>'
+  try {
+    const res = await fetch('/api/agents/model-suggest', { method: 'POST' })
+    if (!res.ok) throw new Error()
+    const { results } = await res.json()
+    const changes = results.filter(r => r.changeAdvised)
+    const ok = results.filter(r => !r.changeAdvised)
+    let html = '<div style="font-size:13px;padding:12px 14px;background:var(--surface-hover);border-radius:8px;border:1px solid var(--border)">'
+    html += `<p style="margin:0 0 8px;font-weight:600">Modell elemzés -- ${results.length} ágens</p>`
+    if (changes.length === 0) {
+      html += '<p style="color:var(--success);margin:0">Minden ágenshez megfelelő modell van beállítva.</p>'
+    } else {
+      html += `<p style="color:var(--warning, #e6a817);margin:0 0 8px">${changes.length} változtatás javasolt:</p>`
+      html += '<ul style="margin:0 0 10px;padding-left:18px">'
+      for (const r of changes) {
+        const safeReason = r.reason.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        html += `<li style="margin-bottom:6px"><strong>${r.agent}</strong>: ${r.currentModel} &rarr; ${r.suggestedModel}`
+        html += ` <details style="display:inline-block;vertical-align:top;margin-left:4px"><summary style="cursor:pointer;font-size:11px;color:var(--text-muted)">részletek</summary>`
+        html += `<pre style="white-space:pre-wrap;font-size:11px;margin:4px 0 0;background:var(--surface);padding:6px 8px;border-radius:4px;color:var(--text-muted)">${safeReason}</pre></details></li>`
+      }
+      html += '</ul>'
+      if (ok.length > 0) {
+        html += `<p style="color:var(--text-muted);margin:0;font-size:12px">Megfelelő: ${ok.map(r => r.agent).join(', ')}</p>`
+      }
+      html += `<button class="btn-secondary btn-compact" id="createModelChangeCardsBtn" style="margin-top:10px">Kanban kártyák létrehozása</button>`
+    }
+    html += '</div>'
+    panel.innerHTML = html
+    const createBtn = document.getElementById('createModelChangeCardsBtn')
+    if (createBtn) {
+      createBtn.addEventListener('click', async () => {
+        if (!confirm(`${changes.length} kanban kártya létrehozása a modell-változtatásokhoz?`)) return
+        createBtn.disabled = true
+        createBtn.textContent = 'Létrehozás...'
+        let created = 0
+        for (const r of changes) {
+          try {
+            await fetch('/api/kanban', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                title: `Modell-váltás: ${r.agent}`,
+                description: `Jelenlegi: ${r.currentModel}\nJavasolt: ${r.suggestedModel}\n\nIndoklás: ${r.reason}`,
+                assignee: 'marveen',
+                priority: 'normal',
+                status: 'planned',
+              }),
+            })
+            created++
+          } catch { /* skip failed card */ }
+        }
+        showToast(`${created} kanban kártya létrehozva.`)
+        createBtn.textContent = `${created} kártya létrehozva`
+      })
+    }
+  } catch { panel.innerHTML = '<p style="color:var(--error);font-size:13px">Hiba az elemzés során.</p>' }
 })
 
 document.getElementById('saveAutoRestartBtn').addEventListener('click', async () => {
@@ -9687,6 +9785,85 @@ document.getElementById('terminalClose')?.addEventListener('click', () => {
   if (terminalSSE) { terminalSSE.close(); terminalSSE = null }
   if (terminalInstance) { terminalInstance.dispose(); terminalInstance = null }
 })
+
+// === Agent conversation (readable transcript) modal ===
+// Renders the agent's Claude Code transcript as a chat-style timeline: inbound
+// Telegram messages, the agent's replies, and (optionally) its notes/actions.
+// Solves what the raw terminal can't: a readable, searchable review of what
+// actually happened -- also the support view for customer-hosted Marveens.
+let conversationEntries = []
+let conversationAgentName = null
+
+async function openConversationModal(agentName, displayName) {
+  const overlay = document.getElementById('conversationOverlay')
+  const container = document.getElementById('conversationContainer')
+  const title = document.getElementById('conversationModalTitle')
+  if (!overlay || !container) return
+  conversationAgentName = agentName
+  title.textContent = (displayName || agentName) + ' — Beszélgetés'
+  container.innerHTML = '<div class="conversation-empty">Betöltés…</div>'
+  openModal(overlay)
+  await loadConversation()
+}
+
+async function loadConversation() {
+  const container = document.getElementById('conversationContainer')
+  const token = localStorage.getItem('marveen-dashboard-token') || ''
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=600`, {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+    const d = await r.json()
+    conversationEntries = Array.isArray(d.entries) ? d.entries : []
+    renderConversation()
+  } catch {
+    if (container) container.innerHTML = '<div class="conversation-empty">Nem sikerült betölteni a beszélgetést.</div>'
+  }
+}
+
+function fmtConvTs(ts) {
+  if (!ts) return ''
+  try {
+    return new Date(ts).toLocaleString('hu-HU', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  } catch { return '' }
+}
+
+function renderConversation() {
+  const container = document.getElementById('conversationContainer')
+  if (!container) return
+  const q = (document.getElementById('conversationSearch')?.value || '').toLowerCase().trim()
+  const showActions = document.getElementById('conversationShowActions')?.checked
+  let list = conversationEntries
+  if (!showActions) list = list.filter(e => e.kind === 'in' || e.kind === 'out')
+  if (q) list = list.filter(e => (e.text || '').toLowerCase().includes(q))
+  if (!list.length) { container.innerHTML = '<div class="conversation-empty">Nincs megjeleníthető üzenet.</div>'; return }
+  container.innerHTML = list.map(renderConvEntry).join('')
+  container.scrollTop = container.scrollHeight
+}
+
+function renderConvEntry(e) {
+  const ts = fmtConvTs(e.ts)
+  const txt = escapeHtml(e.text || '').replace(/\n/g, '<br>')
+  if (e.kind === 'in') {
+    return `<div class="conv-row conv-in"><div class="conv-bubble"><div class="conv-meta">Telegram be · ${ts}</div><div class="conv-text">${txt}</div></div></div>`
+  }
+  if (e.kind === 'out') {
+    const lbl = escapeHtml(e.label || 'válasz')
+    return `<div class="conv-row conv-out"><div class="conv-bubble"><div class="conv-meta">${lbl} · ${ts}</div><div class="conv-text">${txt}</div></div></div>`
+  }
+  if (e.kind === 'note') {
+    return `<div class="conv-row conv-note"><div class="conv-note-text">📝 ${txt}</div></div>`
+  }
+  return `<div class="conv-row conv-action"><div class="conv-action-text">⚙ ${txt}<span class="conv-action-ts">${ts}</span></div></div>`
+}
+
+document.getElementById('conversationClose')?.addEventListener('click', () => {
+  const overlay = document.getElementById('conversationOverlay')
+  if (overlay) closeModal(overlay)
+})
+document.getElementById('conversationSearch')?.addEventListener('input', () => renderConversation())
+document.getElementById('conversationShowActions')?.addEventListener('change', () => renderConversation())
+document.getElementById('conversationRefresh')?.addEventListener('click', () => loadConversation())
 ;(() => {
   function routeFromHash() {
     let pageId = decodeURIComponent((location.hash || '').replace(/^#/, ''))
@@ -9826,8 +10003,94 @@ async function openDoc(name) {
     const res = await fetch('/api/docs/' + encodeURIComponent(name))
     if (!res.ok) throw new Error('HTTP ' + res.status)
     const doc = await res.json()
-    contentEl.innerHTML = renderMarkdown(doc.content || '')
+    const content = doc.content || ''
+    // Toolbar with a raw-.md download, then the rendered markdown.
+    contentEl.innerHTML =
+      '<div class="docs-content-toolbar">' +
+        '<button class="btn-secondary btn-compact" id="docsDownloadBtn">⬇ .md letöltés</button>' +
+      '</div>' +
+      '<div class="docs-rendered markdown-body">' + renderMarkdown(content) + '</div>'
+    const dl = document.getElementById('docsDownloadBtn')
+    if (dl) dl.addEventListener('click', () => downloadMarkdown(name, content))
   } catch (e) {
     contentEl.innerHTML = '<p class="muted">Nem sikerült megnyitni: ' + escapeHtml(String(e.message || e)) + '</p>'
   }
 }
+
+// Download a doc's raw markdown as a .md file (client-side Blob, no server).
+function downloadMarkdown(name, content) {
+  try {
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = /\.md$/.test(name) ? name : (name + '.md')
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (e) {
+    showToast('Nem sikerült a letöltés: ' + String(e && e.message || e))
+  }
+}
+
+// === Mobile login (QR of the ?token= bootstrap URL) ===
+// The desktop is already authenticated, so the token lives in localStorage.
+// We render it as a QR purely client-side and show it in a modal; the phone
+// scans it and stores the token locally. The token never travels through chat.
+(function setupMobileLogin() {
+  const btn = document.getElementById('mobileLoginBtn')
+  const overlay = document.getElementById('mobileLoginOverlay')
+  if (!btn || !overlay) return
+  const qrBox = document.getElementById('mobileLoginQr')
+  const closeBtn = document.getElementById('mobileLoginClose')
+
+  async function render() {
+    const token = localStorage.getItem('marveen-dashboard-token')
+    if (!token) {
+      qrBox.innerHTML = '<p class="muted">Nincs eltárolt token ebben a böngészőben, előbb itt lépj be.</p>'
+      return
+    }
+    if (typeof qrcode !== 'function') {
+      qrBox.innerHTML = '<p class="muted">A QR-generátor nem töltött be (CDN). Hálózat?</p>'
+      return
+    }
+    // The QR must encode a URL the phone can reach. If the desktop opened the
+    // dashboard on localhost/127.0.0.1, window.location.origin would put
+    // "localhost" in the QR and the phone would hit its OWN localhost. In that
+    // case ask the server for its LAN IP and build the QR from that. If the
+    // dashboard is already open on a LAN IP or a tunnel host, the origin works
+    // as-is.
+    let base = window.location.origin
+    const host = window.location.hostname
+    if (host === 'localhost' || host === '127.0.0.1') {
+      qrBox.innerHTML = '<p class="muted">QR készítése…</p>'
+      try {
+        const r = await fetch('/api/network-info', { headers: { 'Authorization': 'Bearer ' + token } })
+        const info = r.ok ? await r.json() : {}
+        if (info.lan_ip) {
+          base = 'http://' + info.lan_ip + ':' + (info.port || window.location.port || '3420')
+        } else {
+          qrBox.innerHTML = '<p class="mobile-login-warn">A mobil-belépés a géped helyi hálózati (LAN) IP-jén működik. Most localhoston nyitottad meg a dashboardot, és nem találtam használható LAN-címet. Nyisd meg a dashboardot a géped LAN-IP-jén (pl. http://192.168.x.x:3420), és onnan próbáld a mobil-belépést.</p>'
+          return
+        }
+      } catch (e) {
+        qrBox.innerHTML = '<p class="mobile-login-warn">Nem sikerült lekérdezni a gép LAN-IP-jét a mobil-belépéshez. Nyisd meg a dashboardot a géped helyi (LAN) IP-jén, és onnan próbáld.</p>'
+        return
+      }
+    }
+    const url = base + '/?token=' + token
+    try {
+      const qr = qrcode(0, 'M') // typeNumber 0 = auto-fit, ECC level M
+      qr.addData(url)
+      qr.make()
+      qrBox.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true })
+    } catch (e) {
+      qrBox.innerHTML = '<p class="muted">Nem sikerült QR-t generálni: ' + escapeHtml(String(e && e.message || e)) + '</p>'
+    }
+  }
+
+  btn.addEventListener('click', () => { render(); openModal(overlay) })
+  if (closeBtn) closeBtn.addEventListener('click', () => closeModal(overlay))
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+})()

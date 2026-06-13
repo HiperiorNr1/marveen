@@ -6,9 +6,10 @@ import { OLLAMA_URL } from '../config.js'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import {
-  detectPaneState,
+  paneLooksIdle,
   decideSubmitFollowup,
   shouldClearTruncatedPreamble,
+  detectsPastePlaceholder,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost } from './agent-config.js'
 import {
@@ -25,7 +26,7 @@ import {
 } from './ssh-tmux.js'
 import { parseTelegramToken } from './telegram.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
-import { CHANNEL_PROVIDER } from '../config.js'
+import { CHANNEL_PROVIDER, MAIN_AGENT_ID } from '../config.js'
 import { loadProfileTemplate } from './profiles.js'
 import { writeAgentSettingsFromProfile } from './agent-scaffold.js'
 import { getSecret } from './vault.js'
@@ -33,6 +34,41 @@ import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
+
+// The fleet's channel plugins keyed by provider. A sub-agent must enable ONLY
+// its own provider's plugin; the others are forced off so it cannot spawn a
+// competing poller against the main agent's bot token (the dup-poller / 409
+// Conflict class). Keep in sync with the user-scope enabledPlugins ids.
+export const CHANNEL_PLUGIN_IDS: Record<string, string> = {
+  telegram: 'telegram@claude-plugins-official',
+  slack: 'slack-channel@marveen-marketplace',
+  discord: 'discord@claude-plugins-official',
+}
+
+// Pure: compute the enabledPlugins map for a sub-agent so that exactly its own
+// channel plugin is enabled and every other channel plugin is disabled.
+// Non-channel plugins in `existing` are preserved untouched.
+//
+// `explicitProvider` MUST be the agent's EXPLICIT per-agent channelProvider
+// (readAgentChannelProvider), or null when unset -- NOT the resolved provider.
+// resolveAgentProvider() defaults an agent with no channelProvider to the global
+// CHANNEL_PROVIDER (telegram), and a legacy-token fallback then marks it
+// hasChannel -- so EVERY channel-less sub-agent (boni/deeper/iris/zara/samu) is
+// launched with --channels plugin:telegram and would keep the dup poller. Keying
+// on the EXPLICIT provider means a channel-less agent (null) disables all three;
+// only an agent that genuinely declares its channel (e.g. slacker=slack) keeps
+// its own plugin.
+export function scopeChannelPlugins(
+  explicitProvider: string | null,
+  existing?: Record<string, boolean>,
+): Record<string, boolean> {
+  const out: Record<string, boolean> = { ...(existing ?? {}) }
+  const ownPlugin = explicitProvider ? CHANNEL_PLUGIN_IDS[explicitProvider] : undefined
+  for (const pid of Object.values(CHANNEL_PLUGIN_IDS)) {
+    out[pid] = pid === ownPlugin
+  }
+  return out
+}
 
 function resolveAgentProvider(name: string): ChannelProviderType {
   const perAgent = readAgentChannelProvider(name)
@@ -268,23 +304,39 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // Claude Code enforces the list rather than bypassing it.
     const profile = loadProfileTemplate(readAgentSecurityProfile(name))
     writeAgentSettingsFromProfile(name, profile)
-    // Channel-less agents must not load the global channel plugins from
-    // enabledPlugins. Without this, they fall back to the main agent's
-    // token and two instances fight over the same getUpdates slot (409
-    // Conflict / orphan watchdog loop causing recurring MCP disconnects).
-    if (!hasChannel) {
+    // A sub-agent must load ONLY its own channel plugin. The user-scope
+    // enabledPlugins would otherwise make EVERY sub-agent spawn a telegram
+    // (and slack/discord) poller that falls back to the main agent's bot
+    // token and fights it over the same getUpdates slot (409 Conflict /
+    // orphan-poller churn / recurring MCP disconnects). Scope the agent's
+    // settings.json so exactly its configured provider stays enabled and the
+    // other channel plugins are forced off; a channel-less agent disables all
+    // three. Applies to channel-HAVING sub-agents too (e.g. a slack agent must
+    // not also run a telegram poller). Re-applied on EVERY spawn because
+    // writeAgentSettingsFromProfile() above regenerates settings.json from the
+    // profile template -- so this survives respawns, unlike a one-off manual
+    // per-agent override (which a respawn silently wiped). The main agent runs
+    // via channels.sh, not this path, so it remains the sole telegram poller.
+    //
+    // CATASTROPHE GUARD: never scope the MAIN agent's plugins here. marveen is
+    // not in agents/ (so listAgentNames never spawns it through this path) and
+    // its channel comes up via channels.sh -- but if a future caller ever passed
+    // MAIN_AGENT_ID in, scopeChannelPlugins(null) would DISABLE the owner's
+    // telegram channel (Szabi's primary line). Refuse outright.
+    if (name !== MAIN_AGENT_ID) {
       const settingsPath = join(agentDir(name), '.claude', 'settings.json')
       try {
         const s = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>
-        s.enabledPlugins = {
-          ...(s.enabledPlugins as Record<string, boolean> | undefined ?? {}),
-          'telegram@claude-plugins-official': false,
-          'slack-channel@marveen-marketplace': false,
-          'discord@claude-plugins-official': false,
-        }
+        // Key on the EXPLICIT per-agent channelProvider (null when unset), NOT
+        // the resolved/defaulted agentProvider -- a channel-less sub-agent must
+        // disable telegram even though resolveAgentProvider defaulted it to it.
+        s.enabledPlugins = scopeChannelPlugins(
+          readAgentChannelProvider(name),
+          s.enabledPlugins as Record<string, boolean> | undefined,
+        )
         writeFileSync(settingsPath, JSON.stringify(s, null, 2))
       } catch (err) {
-        logger.warn({ err, name }, 'Could not disable channel plugins for channel-less agent')
+        logger.warn({ err, name }, 'Could not scope channel plugins for sub-agent')
       }
     }
     const skipFlag = profile.permissionMode === 'strict' ? '' : '--dangerously-skip-permissions '
@@ -485,19 +537,70 @@ export function scheduleIdentitySetup(session: string, displayName: string, host
   }, MODAL_DISMISS_DELAY_MS)
 }
 
-// How many follow-up Enters sendPromptToSession() is willing to fire
-// when the post-send capture says the prompt is still parked in the
-// input box. Two retries cover the observed stuck-rate (single-pane
-// recovery typically lands on the first or second extra Enter); a
-// stuck-after-two-retries pane gets a logged give-up so the operator
-// can intervene rather than the loop spinning indefinitely.
-const SUBMIT_RETRY_MAX_ATTEMPTS = 2
+// How many follow-up actions (retry-Enter OR clear-and-resend)
+// sendPromptToSession() is willing to fire when the post-send capture says
+// the prompt is still parked in the input box. The verbatim path lands on the
+// first or second extra Enter; the placeholder clear-and-resend path needs a
+// little more headroom because a resend can itself occasionally park (the
+// observed convergence was placeholder -> resend -> verbatim/placeholder ->
+// resend -> submitted, i.e. up to ~3 cycles). Four bounds the loop well past
+// the empirical worst case (which converged within 5 in a 12/12 proof) while
+// still giving a logged give-up so a pathologically stuck pane does not spin
+// indefinitely.
+const SUBMIT_RETRY_MAX_ATTEMPTS = 4
 // Wait between sending an Enter and re-capturing the pane. Long enough
 // for tmux to flush the keystroke into the Claude Code TUI and for
 // the TUI to either transition to busy (turn started) or stay idle
 // with the parked text (still stuck). Empirically 300ms is past the
 // frame-render gap detectPaneState already guards against.
 const SUBMIT_RETRY_POLL_MS = '0.3'
+
+// Pre-flight wait-until-idle gate (root-cause fix for the busy-stuck class).
+// Before streaming chunks we poll the pane and wait for it to return to the
+// 'idle' state. Sending while the target is mid-turn (footer `esc to
+// interrupt`) is the condition the stuck-input incidents correlated with: the
+// typed text + trailing Enter can be parked in the input box (verbatim or as a
+// `[Pasted text #N]` stub) and only "land" much later, so a delegated prompt
+// sits unsubmitted until a human presses Enter. Waiting for idle removes that
+// condition for EVERY caller of sendPromptToSession (router, scheduler,
+// channel-monitor, /login, worker) rather than relying on each caller to gate
+// itself -- and it closes the check->send TOCTOU gap where a caller's own
+// readiness check passed but the agent started a turn before the bytes landed.
+//
+// Budget: poll every PANE_IDLE_POLL_MS up to PANE_IDLE_WAIT_TIMEOUT_MS total.
+// The timeout is generous on purpose -- it must NOT truncate a legitimately
+// long turn into a premature "give up and send anyway". 12s comfortably spans
+// the inter-turn gaps and short tool-calls we observe between a turn's visible
+// completion and the input box settling, while still bounding the wait so a
+// genuinely long-running turn does not block the 5s router / 60s scheduler tick
+// indefinitely. On timeout we proceed best-effort: the existing post-send
+// retry loop (decideSubmitFollowup) remains the backstop, and a hard-busy
+// session that never idles must still receive its prompt eventually.
+const PANE_IDLE_WAIT_TIMEOUT_MS = 12_000
+const PANE_IDLE_POLL_MS = 300
+// String form for /bin/sleep (seconds), kept in sync with PANE_IDLE_POLL_MS.
+const PANE_IDLE_POLL_S = (PANE_IDLE_POLL_MS / 1000).toFixed(3)
+
+// Block until the session's pane looks idle, or the budget elapses. Returns
+// true if idle was observed, false on timeout-still-busy (caller proceeds
+// best-effort). Reuses the shared paneLooksIdle predicate -- the SAME rule the
+// readiness check and the auto-restart idle-guard use -- so the busy regex is
+// never re-inlined here. A capture failure is treated as "not yet idle" and we
+// keep polling within the budget (a transient tmux hiccup should not be read as
+// idle and let us blast a prompt into a busy pane).
+export function waitForPaneIdle(
+  session: string,
+  host: string | null = null,
+  timeoutMs: number = PANE_IDLE_WAIT_TIMEOUT_MS,
+): boolean {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const pane = capturePane(session, host)
+    if (pane != null && paneLooksIdle(pane)) return true
+    if (Date.now() >= deadline) return false
+    try { execFileSync('/bin/sleep', [PANE_IDLE_POLL_S], { timeout: 2000 }) } catch { /* best effort */ }
+  }
+}
 
 // Buffer-clear (Ctrl-U) used pre-flight when shouldClearTruncatedPreamble
 // flags a stale preamble. Sent as a single key name (no `-l` literal
@@ -511,6 +614,44 @@ export function clearInputBuffer(session: string, host: string | null = null): v
   } catch (err) {
     logger.warn({ err, session }, 'Failed to clear pane input buffer before send')
   }
+}
+
+// How many Ctrl-C presses the placeholder-discard will attempt before giving
+// up. Empirically a single Ctrl-C discards a `[Pasted text #N]` stub (and
+// expanded verbatim text) and returns to the empty prompt; the extra presses
+// cover a frame race where the first one was eaten mid-render.
+const PLACEHOLDER_DISCARD_MAX = 3
+// Settle window after a Ctrl-C so the next capture reflects the cleared box.
+const PLACEHOLDER_DISCARD_SETTLE_S = '0.45'
+
+// Discard a `[Pasted text #N]` placeholder (or the verbatim text it expands
+// into) from the input box with Ctrl-C, then confirm the box no longer holds
+// the placeholder. Ctrl-U is deliberately NOT used: it is proven NOT to clear
+// a paste placeholder, and on a multi-row verbatim buffer it only clears the
+// row the cursor sits on. Ctrl-C is the only key that reliably empties the box.
+//
+// SAFETY: Ctrl-C on an EMPTY Claude Code box quits the TUI, and on a BUSY pane
+// it interrupts the live turn. This helper must therefore only ever be called
+// when a placeholder is CONFIRMED present (box non-empty, not busy) -- which
+// detectsPastePlaceholder guarantees at the call site. We re-check before each
+// press and stop the instant the placeholder is gone, so we never press Ctrl-C
+// into an already-empty box. Returns true if the placeholder was cleared.
+function discardPlaceholderBuffer(session: string, host: string | null = null): boolean {
+  for (let i = 0; i < PLACEHOLDER_DISCARD_MAX; i++) {
+    const pane = capturePane(session, host)
+    // Stop pressing once the stub is gone -- a further Ctrl-C on an empty box
+    // would quit the TUI.
+    if (pane != null && !detectsPastePlaceholder(pane)) return true
+    try {
+      runTmux(host, ['send-keys', '-t', session, 'C-c'], { timeout: 5000 })
+    } catch (err) {
+      logger.warn({ err, session }, 'discardPlaceholderBuffer: Ctrl-C send failed')
+      return false
+    }
+    try { execFileSync('/bin/sleep', [PLACEHOLDER_DISCARD_SETTLE_S], { timeout: 2000 }) } catch { /* best effort */ }
+  }
+  const finalPane = capturePane(session, host)
+  return finalPane != null && !detectsPastePlaceholder(finalPane)
 }
 
 // Send text to a tmux session as if typed at the prompt.
@@ -532,9 +673,35 @@ export function clearInputBuffer(session: string, host: string | null = null): v
 // still reports stuck, send up to SUBMIT_RETRY_MAX_ATTEMPTS extra
 // Enters. The retry budget bounds the loop so a pathologically stuck
 // pane gives up rather than spinning.
-export function sendPromptToSession(session: string, text: string, host: string | null = null): void {
+export function sendPromptToSession(
+  session: string,
+  text: string,
+  host: string | null = null,
+  opts: { waitForIdle?: boolean } = {},
+): void {
   dismissSurveyModalIfPresent(session, host)
   dismissResumeSummaryModalIfPresent(session, host)
+
+  // Pre-flight wait-until-idle (root-cause gate). Placed here -- inside
+  // sendPromptToSession, AFTER the modal dismissals (a modal keeps the pane
+  // non-idle, so we must clear it first or the wait would always time out) and
+  // BEFORE the truncated-preamble check + chunk-send -- so EVERY caller is
+  // protected by default and the live input box we inspect/clear below reflects
+  // a settled, idle pane. On timeout we fall through and send anyway: a session
+  // that never idles must still receive its prompt, and the post-send retry
+  // loop is the backstop. host is threaded so a remote agent's pane is polled
+  // over ssh.
+  //
+  // opts.waitForIdle defaults to true (the gate is ON for every caller). The
+  // forceSend scheduled-task path opts OUT (waitForIdle:false): forceSend is
+  // documented to skip the busy-state check so a task does NOT pile up retries
+  // against a session that stays busy for hours (the overnight 275-retry loop).
+  // Eating the 12s idle wait here would defeat that contract -- the whole point
+  // of forceSend is to inject regardless and let Claude Code queue it.
+  const waitForIdle = opts.waitForIdle !== false
+  if (waitForIdle && !waitForPaneIdle(session, host)) {
+    logger.warn({ session }, 'sendPromptToSession: pane still busy after wait-until-idle budget; sending best-effort')
+  }
 
   // Pre-flight buffer-clear when a stale preamble is detected. Reading
   // the pane is best-effort: a capture failure here means we cannot
@@ -552,6 +719,11 @@ export function sendPromptToSession(session: string, text: string, host: string 
 
   const oneLine = text.replace(/\r?\n/g, ' ')
   const CHUNK = 80
+  // Stream oneLine into the pane as CHUNK-sized literal send-keys writes,
+  // followed by a submitting Enter. Extracted as a closure so the
+  // clear-and-resend recovery path below can replay the EXACT same byte
+  // stream after a Ctrl-C, rather than duplicating the dash-slide logic.
+  //
   // tmux send-keys doesn't support `--` option-terminator, so a chunk that
   // starts with '-' parses as a flag ("command send-keys: unknown flag -s"
   // on Hungarian suffixes like -szal/-vel/-ban). Slide the boundary up to a
@@ -559,25 +731,42 @@ export function sendPromptToSession(session: string, text: string, host: string 
   // so a long run of dashes doesn't inflate one chunk past the paste-detector
   // threshold; if the cap is reached, prepend a space to the chunk instead.
   const MAX_SLIDE = 8
-  let i = 0
-  while (i < oneLine.length) {
-    let end = Math.min(i + CHUNK, oneLine.length)
-    let slide = 0
-    while (end < oneLine.length && oneLine[end] === '-' && slide < MAX_SLIDE) {
-      end++; slide++
+  const sendChunks = (): void => {
+    let i = 0
+    while (i < oneLine.length) {
+      let end = Math.min(i + CHUNK, oneLine.length)
+      let slide = 0
+      while (end < oneLine.length && oneLine[end] === '-' && slide < MAX_SLIDE) {
+        end++; slide++
+      }
+      let chunk = oneLine.slice(i, end)
+      if (chunk.startsWith('-')) chunk = ' ' + chunk
+      runTmux(host, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
+      i = end
+      if (i < oneLine.length) execFileSync('/bin/sleep', ['0.03'], { timeout: 1000 })
     }
-    let chunk = oneLine.slice(i, end)
-    if (chunk.startsWith('-')) chunk = ' ' + chunk
-    runTmux(host, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
-    i = end
-    if (i < oneLine.length) execFileSync('/bin/sleep', ['0.03'], { timeout: 1000 })
+    runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
   }
-  runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+  sendChunks()
 
   // Post-send retry loop. The payload hint is the first chunk of oneLine
   // (truncated to a safe length) so the verbatim-stuck path has something
   // recognisable to substring-match against without leaking the whole
   // prompt body into log lines should the give-up branch fire.
+  //
+  // Two stuck modes, two recoveries (see decideSubmitFollowup):
+  //   - VERBATIM text parked under an idle footer -> a plain Enter submits it
+  //     ('retry-enter').
+  //   - A `[Pasted text #N]` placeholder -> a plain Enter does NOT submit it
+  //     (proven: Enter only expands the stub to still-parked verbatim text,
+  //     and once the text spans multiple visual rows a plain Enter inserts a
+  //     newline rather than submitting). The placeholder forms when several
+  //     chunks coalesce into one >~700-char PTY read under tmux-server
+  //     contention, tripping the TUI's bracketed-paste detector. The only
+  //     reliable fix is to Ctrl-C the buffer empty and re-send the chunks
+  //     ('clear-and-resend'). The same Ctrl-C path also clears an expanded
+  //     multi-row verbatim buffer that a plain Enter cannot submit, so a
+  //     resend that itself parks is re-cleared and retried until it lands.
   const payloadHint = oneLine.slice(0, Math.min(oneLine.length, 96))
   for (let attempt = 0; ; attempt++) {
     try { execFileSync('/bin/sleep', [SUBMIT_RETRY_POLL_MS], { timeout: 2000 }) } catch { /* best effort */ }
@@ -587,6 +776,23 @@ export function sendPromptToSession(session: string, text: string, host: string 
     if (action === 'give-up') {
       logger.warn({ session, attempt }, 'sendPromptToSession: prompt still parked after retries')
       break
+    }
+    if (action === 'clear-and-resend') {
+      // Placeholder confirmed in the pane (box non-empty, not busy), so the
+      // Ctrl-C in discardPlaceholderBuffer is safe. Clear it, then replay the
+      // chunk stream. The loop re-samples on the next iteration and will keep
+      // recovering (or give up at the budget) if the resend itself parks.
+      logger.info({ session, attempt }, 'sendPromptToSession: paste placeholder detected; clearing and re-sending')
+      if (!discardPlaceholderBuffer(session, host)) {
+        logger.warn({ session, attempt }, 'sendPromptToSession: failed to clear paste placeholder before resend')
+      }
+      try {
+        sendChunks()
+      } catch (err) {
+        logger.warn({ err, session, attempt }, 'Clear-and-resend chunk replay failed')
+        break
+      }
+      continue
     }
     // action === 'retry-enter'
     try {
@@ -650,12 +856,12 @@ export function capturePane(session: string, host: string | null = null): string
 export function isSessionReadyForPrompt(session: string, host: string | null = null): boolean {
   const first = capturePane(session, host)
   if (first == null) return false
-  if (detectPaneState(first) !== 'idle') return false
+  if (!paneLooksIdle(first)) return false
 
   try { execFileSync('/bin/sleep', [PANE_READY_CONFIRM_DELAY_S], { timeout: 2000 }) } catch { /* best effort */ }
 
   const second = capturePane(session, host)
   if (second == null) return false
-  return detectPaneState(second) === 'idle'
+  return paneLooksIdle(second)
 }
 
