@@ -1,4 +1,4 @@
--- NAV cashflow-dashboard schema -- target DB: nav_invoices (ESXi nav-cashflow-db).
+-- NAV cashflow-dashboard schema -- target DB: nav_invoices (ESXi efi-analytics-db).
 -- Load once the stack is up:
 --   psql "postgresql://navsync:***@172.19.250.10:5433/nav_invoices" -f scripts/nav-cashflow-schema.sql
 -- Idempotent: safe to re-run (IF NOT EXISTS / CREATE OR REPLACE).

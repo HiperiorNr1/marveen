@@ -17,10 +17,10 @@ review). NavClient interfész a Szotasz/nav-online-invoice-mcp repobol verifikal
 
 Ezek BLOKKOLJAK a tovabbi munkat es Krisztian jelenletet igenylik. Sorrendben:
 
-- **[K1] nav-cashflow stack deploy a Portainerben (ESXi)** -- az 1. szekcio
+- **[K1] efi-analytics stack deploy a Portainerben (ESXi)** -- az 1. szekcio
   compose-aval. Click-through lent.
 - **[K2] Halozati eleresi adatok (3. szekcio kritikus fuggosege):** az ESXi-host
-  LAN-IP-je, a nav-cashflow-db publikalt portja (javaslat 5433, hogy ne usse az
+  LAN-IP-je, a efi-analytics-db publikalt portja (javaslat 5433, hogy ne usse az
   odoo_db 5432-t), tuzfal Marveen-host -> ESXi:5433, es egy sync-DB user+jelszo.
 - **[K3] NAV TEST-credek validacioja:** a vault 5 titka (nav_login, nav_password,
   nav_tax_number, nav_signature_key, nav_exchange_key) a NAV TEST-kornyezetre
@@ -34,54 +34,56 @@ Krisztian tavolleteben is megy.
 
 ---
 
-## 1. docker-compose: nav-cashflow stack (postgres + metabase)
+## 1. docker-compose: efi-analytics stack (postgres + metabase)
 
-Uj IZOLALT stack a Portainerben, neve `nav-cashflow`. Sajat halozat, sajat
+Uj IZOLALT stack a Portainerben, neve `efi-analytics` (altalanos BI-platform;
+a NAV csak az elso dataset benne -- a postgres-ben kesobb tobb DB is johet).
+Sajat halozat, sajat
 volume, KULON az odoo-stacktol. Egyetlen postgres instance ket DB-vel:
 `nav_invoices` (a szamla-adat) + `metabase_app` (a Metabase sajat metadat-tara,
 hogy egy helyen legyen es egyutt mentodjon).
 
 ```yaml
-# Portainer -> Stacks -> Add stack -> name: nav-cashflow -> Web editor -> paste
+# Portainer -> Stacks -> Add stack -> name: efi-analytics -> Web editor -> paste
 version: "3.8"
 
 services:
-  nav-cashflow-db:
+  efi-analytics-db:
     image: postgres:15-alpine
-    container_name: nav-cashflow-db
+    container_name: efi-analytics-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${NAVDB_USER}            # Portainer env (lent)
       POSTGRES_PASSWORD: ${NAVDB_PASSWORD}
       POSTGRES_DB: nav_invoices
     volumes:
-      - nav_db_data:/var/lib/postgresql/data
+      - analytics_db_data:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro   # metabase_app DB + schema seed
     ports:
       - "5433:5432"        # [K2] kifele publikalva, hogy a Marveen-host elerje
-    networks: [nav-cashflow-net]
+    networks: [efi-analytics-net]
 
-  nav-cashflow-metabase:
+  efi-analytics-metabase:
     image: metabase/metabase:v0.50.21        # PINELT verzio (ne :latest)
-    container_name: nav-cashflow-metabase
+    container_name: efi-analytics-metabase
     restart: unless-stopped
-    depends_on: [nav-cashflow-db]
+    depends_on: [efi-analytics-db]
     environment:
       MB_DB_TYPE: postgres
       MB_DB_DBNAME: metabase_app
       MB_DB_PORT: 5432
       MB_DB_USER: ${NAVDB_USER}
       MB_DB_PASS: ${NAVDB_PASSWORD}
-      MB_DB_HOST: nav-cashflow-db
+      MB_DB_HOST: efi-analytics-db
     ports:
       - "3001:3000"        # dashboard UI; host 3001 (3000 gyakran foglalt)
-    networks: [nav-cashflow-net]
+    networks: [efi-analytics-net]
 
 volumes:
-  nav_db_data:
+  analytics_db_data:
 
 networks:
-  nav-cashflow-net:
+  efi-analytics-net:
     driver: bridge
 ```
 
@@ -96,12 +98,12 @@ lepes), es a metabase_app DB-t egy `CREATE DATABASE metabase_app;`-pal. Javaslat
 kezi schema-betoltes, hogy ne kelljen fajlt masolnia az ESXi-re.
 
 **[K1] Click-through Krisztiannak:**
-1. Portainer -> Stacks -> + Add stack -> Name: `nav-cashflow`.
+1. Portainer -> Stacks -> + Add stack -> Name: `efi-analytics`.
 2. Web editor -> a fenti YAML beillesztese.
 3. Environment variables -> add: NAVDB_USER (pl. navsync), NAVDB_PASSWORD (eros).
 4. Deploy the stack.
-5. Ellenorzes: nav-cashflow-db + nav-cashflow-metabase containers "running".
-6. metabase_app DB letrehozas (Portainer -> nav-cashflow-db -> Console / exec):
+5. Ellenorzes: efi-analytics-db + efi-analytics-metabase containers "running".
+6. metabase_app DB letrehozas (Portainer -> efi-analytics-db -> Console / exec):
    `psql -U navsync -d nav_invoices -c "CREATE DATABASE metabase_app;"`
    (a Metabase enelkul nem indul el rendesen -> a [K4] elott kell).
 
@@ -239,7 +241,7 @@ Cron-javaslat: 6 oranként (a NAV-adat nem valos-ideju; a cashflow-nezethez bove
 eleg). Manualis "run now" a dashboardrol elerheto. A 6 oras kezdetet kerulje a
 0:00-t, hogy ne essen egybe az ejszakai pg_dump backuppal.
 
-Halozati cel: a sync a nav-cashflow-db postgres-be ir az ESXi-n -> a [K2]
+Halozati cel: a sync a efi-analytics-db postgres-be ir az ESXi-n -> a [K2]
 fuggoseg (4. szekcio).
 
 Backup: kulon ejszakai `pg_dump nav_invoices` (+ metabase_app) -> NAS DS1621.
@@ -252,7 +254,7 @@ utan; nem blokkolo.)
 ## 4. Halozati elerhetoseg (KRITIKUS fuggoseg -- [K2])
 
 A sync a Marveen-hoston fut, a postgres az ESXi-n. A kapcsolat:
-`Marveen-host --(LAN)--> ESXi-host:5433 (nav-cashflow-db publikalt port)`.
+`Marveen-host --(LAN)--> ESXi-host:5433 (efi-analytics-db publikalt port)`.
 
 Krisztiantol kell ([K2]):
 - **ESXi-host LAN-IP-je** (a Marveen-host ugyanazon a LAN-on van-e? ha nem,
@@ -282,7 +284,7 @@ Ezt a [K2] valasza donti el -- elso kerdes Krisztianhoz.
 3. **Halozat-verify ([K2] utan):** a Marveen-host `psql`/pg-client tud-e
    csatlakozni az ESXi:5433-ra (a sync ezen ir).
 4. **Metabase elso grafikon ([K4] utan):** Metabase -> Add database -> postgres
-   (nav-cashflow-db, nav_invoices) -> egy idosoros cashflow-grafikon a
+   (efi-analytics-db, nav_invoices) -> egy idosoros cashflow-grafikon a
    v_cashflow_due_monthly-bol (esedekesseg-tengely, gross_huf havonta,
    iranyonkent) -- ez a "varhato cashflow" elsodleges nezete. A
    v_cashflow_monthly (teljesites) parhuzamos masodlagos nezet. Ez az elso
