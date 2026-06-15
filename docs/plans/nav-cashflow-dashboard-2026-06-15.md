@@ -310,3 +310,35 @@ Ezt a [K2] valasza donti el -- elso kerdes Krisztianhoz.
 Becsult munkamennyiseg a GO utan: stack-deploy (Krisztian, ~30 perc) + schema +
 sync-script + test-validacio ~1 munkanap; production-backfill + Metabase-nezetek
 ~0.5 nap.
+
+---
+
+## Adatminoseg / ismert korlatok (prod-cutover utani megfigyelesek, 2026-06-15)
+
+A 24-honapos prod-backfill (11324 szamla) utan rogzitett jellemzok. Egyik sem
+cashflow-toro; completeness/dashboard-kontextus.
+
+- **SIMPLIFIED szamla = nincs osszeg a digestben.** A NAV `queryInvoiceDigest`
+  egyszerusitett szamlahoz (invoice_category=SIMPLIFIED) NEM ad semmilyen
+  osszeg-mezot (verifikalva mind a 169 INBOUND soron: invoiceNetAmount /
+  invoiceGrossAmount / invoiceGrossAmountHUF mind 0 db). A digest csak
+  partner/datum/szam/fizetes-mod. Ezert `gross_amount_huf` NULL ezeken
+  (~4.5% az INBOUND DARABSZAMbol, de ertekben jellemzoen <1% -- kis keszpenzes
+  kiskeres tetelek, pl. OBI/Posta). DONTES (EFiveen 2026-06-15): ELFOGADVA +
+  dokumentalva; a chartok NOT NULL-ra szurnek, a reggeli osszefoglaloban
+  labjegyzet. A brutto CSAK a `queryInvoiceData`-bol (teljes szamla-XML,
+  per-szamla hivas) erheto el -> NEM epitunk kulon enrichment-utat: ha jon a
+  jovobeli tetelsoros (queryInvoiceData) bovites, a simplified-brutto INGYEN
+  megoldodik vele.
+- **raw_digest jsonb objektum** (commit 9604fe6 utan). Korabban dupla-kodolt
+  string volt (JSON.stringify + ::jsonb -> Bun.SQL jsonb-string); javitva
+  (objektum-atadas), a meglevo 11324 sor helyben dekodolva. Most `->>`/`?`
+  operatorokkal query-elheto a Metabase-ben.
+- **partner_name ~20% NULL** -- B2C kimeno szamlak, ahol a NAV adatvedelmi
+  okbol kihagyja a customerName-t. Csak partner-szintu nezeteket erint, az
+  aggregalt cashflow-t nem.
+- **payment_due_date ~3% NULL** -- keszpenzes/azonnali szamlak -> a
+  v_cashflow_due_monthly null-honap bucketje; a v_cashflow_monthly
+  (teljesites-tengely) lefedi oket.
+- **EUR ~14 szamla** -- a *_huf oszlopok kezelik (NAV arfolyamozott HUF-ot ad);
+  par EUR-szamla HUF-konverzio nelkul -> gross_amount_huf NULL (a SUM kihagyja).
