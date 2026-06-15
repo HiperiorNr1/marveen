@@ -145,7 +145,10 @@ function mapDigest(d: Record<string, any>, direction: Direction) {
     invoice_category: d.invoiceCategory ?? null,
     invoice_appearance: d.invoiceAppearance ?? null,
     ins_date: d.insDate ?? null,
-    raw_digest: JSON.stringify(d),
+    // Pass the OBJECT (not a JSON string) so Bun.SQL serializes it to a jsonb
+    // object. A pre-stringified value double-encodes into a jsonb STRING that
+    // can't be queried with ->>/? operators (only via #>> '{}').
+    raw_digest: d,
   }
 }
 
@@ -176,7 +179,7 @@ async function upsert(sql: SQL, row: ReturnType<typeof mapDigest>): Promise<void
       ${row.partner_name}, ${row.partner_tax_number}, ${row.issue_date}, ${row.fulfillment_date},
       ${row.payment_due_date}, ${row.net_amount}, ${row.vat_amount}, ${row.gross_amount}, ${row.net_amount_huf},
       ${row.gross_amount_huf}, ${row.currency}, ${row.payment_method}, ${row.invoice_category},
-      ${row.invoice_appearance}, ${row.ins_date}, ${row.raw_digest}::jsonb
+      ${row.invoice_appearance}, ${row.ins_date}, ${row.raw_digest}
     )
     ON CONFLICT (direction, invoice_number, invoice_operation) DO UPDATE SET
       original_invoice_number = EXCLUDED.original_invoice_number,
