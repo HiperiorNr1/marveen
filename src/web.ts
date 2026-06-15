@@ -14,6 +14,7 @@ import { startMessageRouter } from './web/message-router.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
+import { startSynoChatWorker } from './web/synochat-worker.js'
 import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
@@ -33,6 +34,7 @@ import { tryHandleMemories } from './web/routes/memories.js'
 import { tryHandleMigrate } from './web/routes/migrate.js'
 import { tryHandleKanban } from './web/routes/kanban.js'
 import { tryHandleSchedules } from './web/routes/schedules.js'
+import { tryHandleBackups } from './web/routes/backups.js'
 import { tryHandleConnectors } from './web/routes/connectors.js'
 import { tryHandleDocs } from './web/routes/docs.js'
 import { tryHandleConnectorsHu } from './web/routes/connectors-hu.js'
@@ -148,6 +150,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleMigrate(routeCtx)) return
       if (await tryHandleKanban(routeCtx)) return
       if (await tryHandleSchedules(routeCtx)) return
+      if (await tryHandleBackups(routeCtx)) return
       if (await tryHandleConnectorsHu(routeCtx)) return
       if (await tryHandleConnectors(routeCtx)) return
       if (await tryHandleDocs(routeCtx)) return
@@ -292,6 +295,9 @@ export function startWebServer(port = 3420): http.Server {
   const updateCheckerInterval = startUpdateChecker()
   logger.info('Update checker started (15min poll)')
 
+  const synoChatWorkerInterval = startSynoChatWorker()
+  logger.info('SynoChat worker started (5s poll, queue->agent bridge)')
+
   // Collect token usage from JSONL transcripts every hour so the run-history
   // token estimates stay fresh without requiring a manual dashboard visit.
   const tokenCollectInterval = setInterval(() => {
@@ -364,6 +370,7 @@ export function startWebServer(port = 3420): http.Server {
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
     clearInterval(autoRestartInterval)
     clearInterval(updateCheckerInterval)
+    clearInterval(synoChatWorkerInterval)
     clearInterval(tokenCollectInterval)
     return origClose(cb)
   }

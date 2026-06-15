@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <title>Marveen — Mentés</title>
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    /* Local-only styles. Keep the SPA's style.css free of backup-specific
+       rules so this page stays a fully drop-in second view. */
+    body { padding: 1.5rem; font-family: system-ui, -apple-system, sans-serif; }
+    .grid { display: grid; gap: 1rem; max-width: 1100px; margin: 0 auto; }
+    .card { background: var(--panel, #fff); border: 1px solid #ddd; border-radius: 8px; padding: 1rem; }
+    .card h2 { margin: 0 0 .5rem 0; font-size: 1.1rem; }
+    .row { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+    .row > .grow { flex: 1; }
+    .muted { color: #888; font-size: .9rem; }
+    .ok { color: #1a7f37; }
+    .fail { color: #c00; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #eee; }
+    th { background: #f7f7f7; font-weight: 600; }
+    code { background: #f5f5f5; padding: 0 .25rem; border-radius: 3px; font-size: .9em; }
+    button { padding: .45rem .9rem; border-radius: 5px; border: 1px solid #888; background: #f5f5f5; cursor: pointer; }
+    button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input[type="text"], input[type="number"] { padding: .4rem .6rem; border-radius: 5px; border: 1px solid #888; min-width: 14rem; }
+    pre.log { background: #111; color: #ddd; padding: .75rem; border-radius: 6px; max-height: 22rem; overflow: auto; font-size: .82rem; }
+    .nav { font-size: .9rem; margin-bottom: .5rem; }
+    .nav a { color: #2563eb; text-decoration: none; }
+    .warn { background: #fff8e6; border-left: 4px solid #d97706; padding: .5rem .75rem; border-radius: 4px; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div class="nav">
+      <a href="/">← Vissza az áttekintésre</a>
+    </div>
+
+    <h1 style="margin:0">Mentés</h1>
+
+    <div class="card warn" id="tokenMissing" hidden>
+      Hiányzik a dashboard bearer token. Add hozzá az URL-hez:
+      <code>?token=&lt;dashboard-token&gt;</code>, vagy nyisd meg ezt az oldalt a fő dashboardról.
+    </div>
+
+    <!-- Last backup card -->
+    <div class="card">
+      <h2>Utolsó mentés</h2>
+      <div id="lastJobBody">
+        <p class="muted">Betöltés…</p>
+      </div>
+      <div class="row" style="margin-top: .75rem">
+        <button id="triggerBtn" class="primary">Mentés indítása</button>
+        <span id="triggerStatus" class="muted"></span>
+      </div>
+    </div>
+
+    <!-- Settings card -->
+    <div class="card">
+      <h2>Beállítások</h2>
+      <div id="settingsBody">
+        <p class="muted">Betöltés…</p>
+      </div>
+      <p class="muted" style="margin-top: .5rem">
+        A titkosítási konfiguráció (<code>BACKUP_ENCRYPTION</code>, <code>BACKUP_AGE_RECIPIENT</code>,
+        <code>BACKUP_ENCRYPT_CMD</code>) csak <code>.env</code>-ből szerkeszthető — szándékos
+        biztonsági korlát, hogy egy elcsúszott kattintás ne kapcsolhassa ki a titkosítást.
+      </p>
+    </div>
+
+    <!-- Archives list -->
+    <div class="card">
+      <h2>Archívumok</h2>
+      <div id="archivesBody">
+        <p class="muted">Betöltés…</p>
+      </div>
+    </div>
+
+    <!-- Log tail -->
+    <div class="card">
+      <h2>Mentési napló</h2>
+      <pre id="logBody" class="log">betöltés…</pre>
+      <div class="row" style="margin-top: .5rem">
+        <button id="refreshBtn">Frissítés</button>
+        <span class="muted">Forrás: <code id="logPath">store/backups.log</code></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // The dashboard's existing bearer-token convention: append ?token=... to
+    // the URL, or open this page via a link that the SPA renders post-auth.
+    // We support both: tokenFromUrl wins, otherwise we surface the missing
+    // token banner and let every API call exit early.
+    const tokenFromUrl = new URLSearchParams(location.search).get('token') || ''
+    const BEARER = tokenFromUrl
+    if (!BEARER) document.getElementById('tokenMissing').hidden = false
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        headers: { ...(opts.headers || {}), 'Authorization': 'Bearer ' + BEARER, 'Content-Type': 'application/json' },
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { detail = JSON.stringify(await res.json()) } catch {}
+        throw new Error(`HTTP ${res.status} ${path} ${detail}`)
+      }
+      return res.json()
+    }
+
+    function fmtBytes(n) {
+      if (n == null) return '—'
+      const k = 1024, units = ['B', 'KiB', 'MiB', 'GiB']
+      let i = 0
+      while (n >= k && i < units.length - 1) { n /= k; i++ }
+      return `${n.toFixed(i === 0 ? 0 : 2)} ${units[i]}`
+    }
+    function fmtAgo(ms) {
+      const s = Math.max(0, Math.floor((Date.now() - ms) / 1000))
+      if (s < 60) return `${s}s`
+      if (s < 3600) return `${Math.floor(s/60)}m`
+      if (s < 86400) return `${Math.floor(s/3600)}h`
+      return `${Math.floor(s/86400)}d`
+    }
+
+    async function loadLast() {
+      try {
+        const data = await api('/api/backups/last')
+        const el = document.getElementById('lastJobBody')
+        if (!data.job && !data.lastArchive) {
+          el.innerHTML = '<p class="muted">Még nincs mentés. Kattints a "Mentés indítása" gombra.</p>'
+          return
+        }
+        const job = data.job
+        const arc = data.lastArchive
+        const rows = []
+        if (job) {
+          const status = job.status === 'ok'
+            ? `<span class="ok">✓ sikeres</span>`
+            : `<span class="fail">✗ hibás</span>`
+          rows.push(`<div><b>Státusz:</b> ${status}</div>`)
+          rows.push(`<div><b>Időpont:</b> ${new Date(job.started_at_ms).toLocaleString('hu')} (${fmtAgo(job.started_at_ms)} ago)</div>`)
+          rows.push(`<div><b>Időtartam:</b> ${(job.duration_ms/1000).toFixed(2)} s</div>`)
+          rows.push(`<div><b>Méret:</b> ${fmtBytes(job.size_bytes)}</div>`)
+          rows.push(`<div><b>Forrás:</b> <code>${job.source}</code></div>`)
+          rows.push(`<div><b>Titkosítás:</b> <code>${job.encryption_mode}</code> ${job.encrypted ? '(igen)' : '(nincs)'}</div>`)
+          if (job.archive_path) rows.push(`<div><b>Archívum:</b> <code>${job.archive_path}</code></div>`)
+          if (job.error) rows.push(`<div class="fail"><b>Hiba:</b> ${job.error}</div>`)
+        } else if (arc) {
+          rows.push(`<div class="muted">Nincs friss <code>backup_jobs</code> sor; a legutóbbi fájl a lemezen:</div>`)
+          rows.push(`<div><code>${arc.filename}</code> · ${fmtBytes(arc.sizeBytes)} · ${new Date(arc.createdAtMs).toLocaleString('hu')}</div>`)
+        }
+        el.innerHTML = rows.join('\n')
+      } catch (err) {
+        document.getElementById('lastJobBody').innerHTML = `<p class="fail">Betöltés sikertelen: ${err.message}</p>`
+      }
+    }
+
+    async function loadSettings() {
+      try {
+        const s = await api('/api/backups/settings')
+        const enc = s.encryption || {}
+        const encryptionSummary = enc.mode === 'key'
+          ? `key + age recipient (${enc.ageRecipient ? enc.ageRecipient.substring(0, 16) + '…' : 'NINCS BEÁLLÍTVA'})`
+          : enc.mode === 'none'
+            ? 'none (NINCS titkosítás)'
+            : `${enc.mode} ${enc.encryptCmdConfigured ? '(escape-hatch BACKUP_ENCRYPT_CMD aktív)' : ''}`
+        document.getElementById('settingsBody').innerHTML = `
+          <div class="row" style="gap:1.5rem">
+            <div><b>Cél könyvtár:</b> <code>${s.backupDir}</code></div>
+            <div><b>Megőrzés:</b> ${s.backupKeep} archívum</div>
+          </div>
+          <div style="margin-top:.5rem"><b>Titkosítás:</b> ${encryptionSummary}</div>
+          <div class="muted" style="margin-top:.5rem">Napló: <code>${s.backupLog}</code></div>
+        `
+      } catch (err) {
+        document.getElementById('settingsBody').innerHTML = `<p class="fail">Beállítások betöltése: ${err.message}</p>`
+      }
+    }
+
+    async function loadArchives() {
+      try {
+        const data = await api('/api/backups')
+        const el = document.getElementById('archivesBody')
+        if (!data.archives.length) {
+          el.innerHTML = `<p class="muted">Nincs archívum a <code>${data.dir}</code> alatt.</p>`
+          return
+        }
+        const rows = data.archives.map(a => `
+          <tr>
+            <td><code>${a.filename}</code></td>
+            <td>${fmtBytes(a.sizeBytes)}</td>
+            <td>${new Date(a.createdAtMs).toLocaleString('hu')}</td>
+            <td>${a.encrypted ? '🔒' : '<span class="fail">⚠ nyitva</span>'}</td>
+            <td><button data-checksum="${a.filename}">SHA256</button></td>
+          </tr>`).join('')
+        el.innerHTML = `
+          <table>
+            <thead><tr><th>Név</th><th>Méret</th><th>Idő</th><th>Titk.</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <p class="muted" style="margin-top:.5rem">Letöltés és visszaállítás <b>parancssorból</b>: <code>scripts/restore.sh ${data.dir}/&lt;archívum&gt;</code></p>`
+        for (const b of el.querySelectorAll('button[data-checksum]')) {
+          b.addEventListener('click', async () => {
+            const fn = b.getAttribute('data-checksum')
+            b.disabled = true; b.textContent = 'számolás…'
+            try {
+              const r = await api(`/api/backups/${encodeURIComponent(fn)}/checksum`)
+              b.textContent = r.sha256.substring(0, 16) + '…'
+              b.title = r.sha256
+            } catch (err) { b.textContent = 'hiba'; b.title = err.message }
+          })
+        }
+      } catch (err) {
+        document.getElementById('archivesBody').innerHTML = `<p class="fail">Archívumok betöltése: ${err.message}</p>`
+      }
+    }
+
+    async function loadLogs() {
+      try {
+        const data = await api('/api/backups/logs?lines=200')
+        document.getElementById('logBody').textContent = (data.lines || []).join('\n') || '(üres)'
+        document.getElementById('logPath').textContent = data.path
+      } catch (err) {
+        document.getElementById('logBody').textContent = `Napló betöltés: ${err.message}`
+      }
+    }
+
+    document.getElementById('triggerBtn').addEventListener('click', async (e) => {
+      const btn = e.currentTarget
+      const status = document.getElementById('triggerStatus')
+      btn.disabled = true; status.textContent = 'Indítás…'
+      try {
+        const r = await api('/api/backups', { method: 'POST' })
+        const started = r.startedAtMs
+        status.textContent = 'Fut… (várakozás a job sor megjelenésére)'
+        // Poll for completion. backup_jobs row is written at end of backup.sh,
+        // so we wait for a row with started_at_ms >= our trigger marker.
+        const pollUrl = r.pollUrl || `/api/backups/jobs/poll?after=${started}`
+        for (let i = 0; i < 120; i++) {
+          await new Promise(r => setTimeout(r, 1500))
+          const p = await api(pollUrl)
+          if (p.job) {
+            status.innerHTML = p.job.status === 'ok'
+              ? `<span class="ok">✓ kész (${(p.job.duration_ms/1000).toFixed(2)}s)</span>`
+              : `<span class="fail">✗ hiba: ${p.job.error || 'ismeretlen'}</span>`
+            await Promise.all([loadLast(), loadArchives(), loadLogs()])
+            break
+          }
+        }
+      } catch (err) {
+        status.innerHTML = `<span class="fail">${err.message}</span>`
+      } finally {
+        btn.disabled = false
+      }
+    })
+
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      loadLast(); loadSettings(); loadArchives(); loadLogs()
+    })
+
+    if (BEARER) {
+      loadLast(); loadSettings(); loadArchives(); loadLogs()
+    }
+  </script>
+</body>
+</html>
