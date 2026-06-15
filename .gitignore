@@ -70,3 +70,6 @@ scripts/support-mail/no-support-reply.html
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Vendored upstream libs (clone+build via setup; not committed)
+vendor/
