@@ -208,18 +208,22 @@ async function main(): Promise<void> {
           .catch(() => { /* best-effort status write */ })
       }
     }
-    // Incremental line-item fetch for newly-arrived INBOUND invoices (Q1: INBOUND
-    // first). Capped + rate-limited so the 6h command-task stays well under its
+    // Incremental line-item fetch for newly-arrived invoices (both directions by
+    // default, so new INBOUND and OUTBOUND invoices get their lines automatically).
+    // Env-overridable (NAV_LINES_INC_DIRECTIONS) in case the 6h sync ever needs
+    // trimming. Capped + rate-limited so the command-task stays well under its
     // timeout; whatever is left is picked up next run or by the standalone
     // backfill. Best-effort: a line-fetch failure never fails the digest sync
     // (the rows keep lines_fetched_at NULL and retry).
+    const incDirections = (process.env.NAV_LINES_INC_DIRECTIONS ?? 'INBOUND,OUTBOUND')
+      .split(',').map(s => s.trim()).filter(Boolean) as Direction[]
     try {
       const lineN = await runLineFetch(sql, nav, {
-        directions: ['INBOUND'],
+        directions: incDirections,
         cap: Number(process.env.NAV_LINES_INCREMENTAL_CAP ?? '40'),
         delayMs: Number(process.env.NAV_LINES_DELAY_MS ?? '400'),
       })
-      if (lineN > 0) console.log(`[nav-sync] line-items: ${lineN} INBOUND invoices fetched (incremental)`)
+      if (lineN > 0) console.log(`[nav-sync] line-items: ${lineN} invoices fetched (incremental, ${incDirections.join('+')})`)
     } catch (err) {
       console.error(`[nav-sync] incremental line-item fetch failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
     }

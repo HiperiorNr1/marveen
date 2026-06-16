@@ -1,11 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import { gzipSync } from 'node:zlib'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   mapInvoiceLine,
   extractInvoiceLines,
   extractInvoiceGrossHuf,
   decodeInvoiceData,
 } from '../nav-line-mapping.js'
+
+// The 6h nav-sync incremental line-fetch must cover BOTH directions so new
+// INBOUND and OUTBOUND invoices get their lines automatically (env-overridable).
+// Locked here so it is never silently reverted to INBOUND-only.
+describe('nav-sync incremental line-fetch direction scope', () => {
+  const src = readFileSync(join(__dirname, '../../scripts/nav-sync.ts'), 'utf-8')
+  it('defaults to both directions via NAV_LINES_INC_DIRECTIONS', () => {
+    expect(src).toMatch(/NAV_LINES_INC_DIRECTIONS/)
+    expect(src).toMatch(/'INBOUND,OUTBOUND'/)
+  })
+  it('does not hardcode the incremental to INBOUND-only', () => {
+    expect(src).not.toMatch(/directions:\s*\['INBOUND'\]/)
+  })
+})
 
 // Fixtures are REAL line structures captured from live NAV queryInvoiceData
 // responses (2026-06-16). They lock the field mapping against the actual schema.
