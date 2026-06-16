@@ -19,73 +19,13 @@
 
 import { SQL } from 'bun'
 import { NavClient } from '../vendor/nav-online-invoice-mcp/dist/nav-client.js'
-import { getSecret } from '../src/web/vault.js'
-
-type Direction = 'INBOUND' | 'OUTBOUND'
-
-const NAV_ENV = (process.env.NAV_ENV ?? 'test').toLowerCase()
-const IS_TEST = NAV_ENV !== 'production'
-
-// NAV API base. Test is lenient (no real software registration needed).
-const NAV_BASE_URL = IS_TEST
-  ? 'https://api-test.onlineszamla.nav.gov.hu/invoiceService/v3'
-  : 'https://api.onlineszamla.nav.gov.hu/invoiceService/v3'
-
-// Self-declared software identifier (NOT a NAV registration -- an 18-char
-// [A-Z0-9] id carried in every request header). Krisztian has no registered
-// id; this fixed EFi string satisfies the schema. Test-env accepts it.
-const SOFTWARE_ID = process.env.NAV_SOFTWARE_ID ?? 'EFICASHFLOW000001X'
-
-// Vault secret ids per env. The 4 core creds are known; the tax-number id is
-// injected via env because the test tax-number secret name is still being
-// clarified with Krisztian (#815: nav-test_tax_number vs reuse nav_tax_number).
-const SECRET_IDS = IS_TEST
-  ? { login: 'nav-test_login', password: 'nav-test_password', signatureKey: 'nav-test_signature_key', exchangeKey: 'nav-test_exchange_key' }
-  : { login: 'nav_login', password: 'nav_password', signatureKey: 'nav_signature_key', exchangeKey: 'nav_exchange_key' }
-const TAXNUMBER_SECRET_ID = process.env.NAV_TAXNUMBER_SECRET_ID ?? (IS_TEST ? 'nav-test_tax_number' : 'nav_tax_number')
-
-// nav-cashflow postgres (ESXi). Host/port overridable; creds from vault.
-const PG_HOST = process.env.NAVDB_HOST ?? '172.19.250.10'
-const PG_PORT = process.env.NAVDB_PORT ?? '5433'
-const PG_NAME = process.env.NAVDB_NAME ?? 'nav_invoices'
+import { buildNavClient, openDb, NAV_ENV, type Direction } from './nav-common.js'
+import { runLineFetch } from './nav-line-items.js'
 
 // NAV insDate query windows are capped (~35 days); chunk longer ranges.
 const WINDOW_DAYS = 30
 // First-run backfill horizon when there is no high-water yet.
 const BACKFILL_DAYS = Number(process.env.NAV_BACKFILL_DAYS ?? '365')
-
-function reqSecret(id: string): string {
-  const v = getSecret(id)
-  if (v == null || v === '') {
-    throw new Error(`vault secret missing: ${id}`)
-  }
-  return v
-}
-
-function buildNavClient(): NavClient {
-  const taxNumber = reqSecret(TAXNUMBER_SECRET_ID)
-  return new NavClient({
-    login: reqSecret(SECRET_IDS.login),
-    password: reqSecret(SECRET_IDS.password),
-    taxNumber,
-    signatureKey: reqSecret(SECRET_IDS.signatureKey),
-    exchangeKey: reqSecret(SECRET_IDS.exchangeKey),
-    baseUrl: NAV_BASE_URL,
-    softwareId: SOFTWARE_ID,
-    softwareName: 'EFi NAV cashflow sync',
-    softwareVersion: '1.0.0',
-    softwareDevName: 'Egresits es Fiai Kft',
-    softwareDevContact: 'hiperior@gmail.com',
-    softwareDevCountryCode: 'HU',
-    softwareDevTaxNumber: taxNumber,
-  })
-}
-
-function pgUrl(): string {
-  const user = encodeURIComponent(reqSecret('navdb_user'))
-  const pass = encodeURIComponent(reqSecret('navdb_password'))
-  return `postgres://${user}:${pass}@${PG_HOST}:${PG_PORT}/${PG_NAME}`
-}
 
 // Split [from, to] into <=WINDOW_DAYS chunks (NAV insDate range cap).
 function windows(from: Date, to: Date): Array<{ from: Date; to: Date }> {
@@ -252,7 +192,7 @@ async function syncDirection(sql: SQL, nav: NavClient, direction: Direction): Pr
 
 async function main(): Promise<void> {
   const nav = buildNavClient()
-  const sql = new SQL(pgUrl())
+  const sql = openDb()
   let failed = false
   try {
     for (const direction of ['OUTBOUND', 'INBOUND'] as Direction[]) {
@@ -267,6 +207,21 @@ async function main(): Promise<void> {
         await sql`UPDATE sync_state SET last_run_at = now(), last_status = ${'error: ' + msg} WHERE direction = ${direction}`
           .catch(() => { /* best-effort status write */ })
       }
+    }
+    // Incremental line-item fetch for newly-arrived INBOUND invoices (Q1: INBOUND
+    // first). Capped + rate-limited so the 6h command-task stays well under its
+    // timeout; whatever is left is picked up next run or by the standalone
+    // backfill. Best-effort: a line-fetch failure never fails the digest sync
+    // (the rows keep lines_fetched_at NULL and retry).
+    try {
+      const lineN = await runLineFetch(sql, nav, {
+        directions: ['INBOUND'],
+        cap: Number(process.env.NAV_LINES_INCREMENTAL_CAP ?? '40'),
+        delayMs: Number(process.env.NAV_LINES_DELAY_MS ?? '400'),
+      })
+      if (lineN > 0) console.log(`[nav-sync] line-items: ${lineN} INBOUND invoices fetched (incremental)`)
+    } catch (err) {
+      console.error(`[nav-sync] incremental line-item fetch failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
     }
   } finally {
     await sql.end().catch(() => { /* ignore */ })
