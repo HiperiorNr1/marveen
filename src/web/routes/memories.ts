@@ -203,12 +203,16 @@ Respond ONLY with JSON, nothing else:
     return true
   }
 
-  if (path === '/api/memories/backfill' && method === 'POST') {
+  // /reembed is an alias for /backfill: both re-run generateEmbedding on every
+  // NULL-embedding memory. The dream-engine + heartbeats call /reembed (which
+  // used to 404 -- a naming gap, the work already lived at /backfill), so keep
+  // both paths on one handler. (card 6d7d14a8)
+  if ((path === '/api/memories/backfill' || path === '/api/memories/reembed') && method === 'POST') {
     try {
       const count = await backfillEmbeddings()
       json(res, { ok: true, count })
     } catch (err) {
-      logger.error({ err }, 'Backfill failed')
+      logger.error({ err }, 'Embedding backfill/reembed failed')
       json(res, { error: 'Backfill failed' }, 500)
     }
     return true
