@@ -931,12 +931,13 @@
             <select id="ideaCategoryFilter" class="input" style="width:160px;font-size:13px">
               <option value="">Összes kategória</option>
             </select>
-            <select id="ideaStatusFilter" class="input" style="width:130px;font-size:13px">
-              <option value="">Összes státusz</option>
+            <select id="ideaStatusFilter" class="input" style="width:165px;font-size:13px">
+              <option value="active" selected>Aktív (új + átnézett)</option>
               <option value="new">Új</option>
               <option value="reviewed">Átnézve</option>
               <option value="kanban">Kanbanban</option>
               <option value="rejected">Elutasítva</option>
+              <option value="">Mind</option>
             </select>
             <button class="btn-primary btn-compact" id="ideaNewBtn">+ Új ötlet</button>
           </div>
@@ -958,6 +959,28 @@
                 <select id="ideaCategoryInput" class="input"><option>Sales</option><option>Oktatás</option><option>Automatizálás</option><option>Integráció</option><option>Rendszer</option><option>Egyéb</option></select>
               </div>
             </div>
+            <div style="display:flex;gap:8px">
+              <div class="form-group" style="flex:1"><label class="form-label">Hatás (Impact) 1-5</label>
+                <select id="ideaImpactInput" class="input">
+                  <option value="">-</option>
+                  <option value="1">1 - Minimális</option>
+                  <option value="2">2 - Kis</option>
+                  <option value="3">3 - Közepes</option>
+                  <option value="4">4 - Nagy</option>
+                  <option value="5">5 - Maximális</option>
+                </select>
+              </div>
+              <div class="form-group" style="flex:1"><label class="form-label">Befektetés (Effort) 1-5</label>
+                <select id="ideaEffortInput" class="input">
+                  <option value="">-</option>
+                  <option value="1">1 - Minimális</option>
+                  <option value="2">2 - Kis</option>
+                  <option value="3">3 - Közepes</option>
+                  <option value="4">4 - Nagy</option>
+                  <option value="5">5 - Maximális</option>
+                </select>
+              </div>
+            </div>
           </div>
           <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
             <button class="btn-secondary" id="ideaModalCancel">Mégse</button>
@@ -976,6 +999,57 @@
             </div>
           </div>
           <div class="modal-footer" style="justify-content:flex-end"><button class="btn-secondary" id="ideaPromoteCancel">Mégse</button></div>
+        </div>
+      </div>
+      <!-- Idea detail modal: comments + impact/effort inline scoring -->
+      <div class="modal-overlay" id="ideaDetailOverlay">
+        <div class="modal" style="max-width:600px;max-height:80vh;overflow-y:hidden;display:flex;flex-direction:column">
+          <div class="modal-header">
+            <div style="flex:1;min-width:0">
+              <h2 id="ideaDetailTitle" style="margin:0;font-size:16px;word-break:break-word"></h2>
+              <div id="ideaDetailMeta" style="font-size:12px;color:var(--text-muted);margin-top:2px"></div>
+            </div>
+            <button class="modal-close" id="ideaDetailClose">&times;</button>
+          </div>
+          <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;overflow-y:auto;flex:1;min-height:0">
+            <div id="ideaDetailDesc" style="font-size:14px;color:var(--text);white-space:pre-wrap"></div>
+            <!-- Inline impact/effort scoring -->
+            <div id="ideaDetailScoring" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;background:var(--bg-input);border-radius:var(--radius-sm)">
+              <span style="font-size:12px;font-weight:600;color:var(--text-muted)">Pontozás:</span>
+              <select id="ideaDetailImpact" class="input" style="width:105px;padding:3px 6px;font-size:12px">
+                <option value="">Impact -</option>
+                <option value="1">Impact 1</option>
+                <option value="2">Impact 2</option>
+                <option value="3">Impact 3</option>
+                <option value="4">Impact 4</option>
+                <option value="5">Impact 5</option>
+              </select>
+              <select id="ideaDetailEffort" class="input" style="width:105px;padding:3px 6px;font-size:12px">
+                <option value="">Effort -</option>
+                <option value="1">Effort 1</option>
+                <option value="2">Effort 2</option>
+                <option value="3">Effort 3</option>
+                <option value="4">Effort 4</option>
+                <option value="5">Effort 5</option>
+              </select>
+              <span id="ideaDetailScoreChip" style="font-size:12px"></span>
+              <button class="btn-secondary btn-compact" id="ideaDetailScoreSave" style="font-size:11px;padding:3px 10px">Mentés</button>
+            </div>
+            <div class="card-detail-comments">
+              <h4 style="margin:0 0 8px;font-size:13px;font-weight:600">Megjegyzések</h4>
+              <div class="comments-list" id="ideaCommentsList"></div>
+              <div class="comment-form" style="margin-top:8px">
+                <textarea id="ideaCommentContent" class="input" rows="2" placeholder="Megjegyzés írása..." style="width:100%;resize:vertical"></textarea>
+                <div style="display:flex;justify-content:flex-end;margin-top:6px">
+                  <button class="btn-primary btn-compact" id="ideaCommentSubmit">Küldés</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer" style="justify-content:space-between">
+            <button class="btn-secondary btn-compact" id="ideaDetailEditBtn">Szerkeszt</button>
+            <button class="btn-secondary btn-compact" id="ideaDetailCloseBtn">Bezár</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1345,6 +1419,10 @@
       <div class="modal-body">
         <p id="breakdownProvider" style="color:var(--text-muted); font-size:0.85em; margin-bottom:12px"></p>
         <div id="breakdownList"></div>
+        <div id="breakdownDoDSection" style="display:none;margin-top:12px">
+          <label style="font-size:12px;font-weight:600;color:var(--text-muted);display:block;margin-bottom:4px">Siker-kritérium (opcionális)</label>
+          <textarea id="breakdownSuccessCriteria" class="input" rows="2" placeholder="Mikor tekinthető sikeresnek a feladat?" style="width:100%;resize:vertical;font-size:13px"></textarea>
+        </div>
         <div class="detail-actions" style="gap:8px; margin-top:16px">
           <button class="btn-primary" id="breakdownAcceptBtn">Subtask-ok létrehozása</button>
           <button class="btn-secondary" id="breakdownRejectBtn">Mégse</button>
