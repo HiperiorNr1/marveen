@@ -1,14 +1,15 @@
 // --- Team / hierarchy ---
 //
-// Pure convenience feature: each agent can declare its role (leader | member),
-// who it reports to, who it delegates to, and whether it's allowed to split a
-// task by itself. No security implications, just routing + visualization for
-// multi-tier agent setups.
+// Each agent can declare its role (leader | member), who it reports to, who it
+// delegates to, and whether it's allowed to split a task by itself. Mostly
+// routing + visualization for multi-tier setups, with ONE security hook:
+// resolveSecurityProfileId() derives the applier-pool from `role` (a `leader`
+// is the install's tech-lead and keeps Supabase; everyone else is deny-by-default).
 
 import { join } from 'node:path'
 import { MAIN_AGENT_ID } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { agentDir, readFileOr, listAgentNames } from './agent-config.js'
+import { agentDir, readFileOr, listAgentNames, readAgentSecurityProfile } from './agent-config.js'
 
 export interface TeamConfig {
   role: 'leader' | 'member'
@@ -45,6 +46,38 @@ export function readAgentTeam(name: string): TeamConfig {
     }
   } catch { /* fall through */ }
   return { ...DEFAULT_TEAM, trustFrom: [] }
+}
+
+/**
+ * Resolve an agent's effective security profile (per-agent Supabase governance,
+ * 2026-06-22). Pure + name-agnostic so it is testable and distribution-safe:
+ *
+ *  - An EXPLICIT non-default stored profile wins (e.g. an agent pinned to
+ *    'sub-dev' or 'applier' on this install).
+ *  - Otherwise it is ROLE-derived: a `leader` (the install's tech-lead) joins
+ *    the applier-pool ('applier' = Supabase retained); everyone else gets the
+ *    deny-by-default 'default'. The rule keys off ROLE, never a hardcoded agent
+ *    name, so a customer install elevates ITS OWN tech-lead, not ours.
+ *
+ * NOTE: `reportsTo === null` is the DEFAULT_TEAM value, so it must NOT be the
+ * applier signal -- that would exempt every default/new agent and defeat the
+ * deny-by-default. The signal is `role === 'leader'`.
+ *
+ * MAIN_AGENT_ID is exempt by construction: the main agent is not profile-managed
+ * (it runs from the host, account-level), so this resolver is never called for it.
+ */
+export function resolveSecurityProfileId(
+  storedProfile: string | null | undefined,
+  team: Pick<TeamConfig, 'role'>,
+): string {
+  const explicit = typeof storedProfile === 'string' ? storedProfile.trim() : ''
+  if (explicit && explicit !== 'default') return explicit
+  return team.role === 'leader' ? 'applier' : 'default'
+}
+
+/** Read-and-resolve convenience over resolveSecurityProfileId for a live agent. */
+export function resolveAgentSecurityProfile(name: string): string {
+  return resolveSecurityProfileId(readAgentSecurityProfile(name), readAgentTeam(name))
 }
 
 export function writeAgentTeam(name: string, team: TeamConfig): void {
