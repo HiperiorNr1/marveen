@@ -37,10 +37,17 @@ source "$(dirname "$0")/install-lang.sh"
 #       and backed up first, because the operator may have hand-edited it.
 RESEED_FLEET="${RESEED_FLEET:-0}"
 REGEN_CLAUDEMD="${REGEN_CLAUDEMD:-0}"
+#   --rebuild  (FORCE_REBUILD=1)   Force a rebuild + restart even when the code
+#       is already up to date. Manual escape hatch for the case where the
+#       compiled dist/ is stale relative to the checked-out source (see the
+#       build-marker self-heal in the already-latest branch below). The marker
+#       normally heals this automatically; --rebuild is the explicit override.
+FORCE_REBUILD="${FORCE_REBUILD:-0}"
 for arg in "$@"; do
   case "$arg" in
     --reseed-fleet|--security-reseed) RESEED_FLEET=1 ;;
     --regen-claudemd) REGEN_CLAUDEMD=1 ;;
+    --rebuild) FORCE_REBUILD=1 ;;
   esac
 done
 
@@ -216,25 +223,58 @@ OLD_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 echo -e "  Letoltes (origin/${CURRENT_BRANCH})..."
 git pull --ff-only origin "$CURRENT_BRANCH"
 NEW_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# Full SHA for the build-marker (dist/.built-commit). HEAD does not change
+# again in this script (no checkout), so this is the commit any build below
+# produces and the value we compare the marker against.
+NEW_VERSION_FULL=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+BUILT_COMMIT_FILE="$INSTALL_DIR/dist/.built-commit"
 
 if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
-  if [ "$RESEED_FLEET" != "1" ] && [ "$REGEN_CLAUDEMD" != "1" ]; then
+  # Already on the latest commit -- but "no new commits" does NOT guarantee the
+  # compiled dist/ matches the source. A prior update can pull new source and
+  # then ABORT before building (set -e on a transient build/npm error, run
+  # detached with stdio:'ignore' so the failure is invisible). That leaves
+  # git=NEW + dist=OLD, and because this branch used to `exit 0`, every later
+  # re-run skipped the build too -- the stale dist never self-healed (the
+  # "two updates + a reboot didn't fix it" symptom). We detect it with a
+  # build-marker: dist/.built-commit records the commit dist was built from.
+  # If it is missing or != HEAD (or --rebuild was passed), the dist is stale,
+  # so we fall through to the normal build + restart instead of exiting.
+  BUILT_COMMIT="$(cat "$BUILT_COMMIT_FILE" 2>/dev/null || echo "")"
+  DIST_STALE=0
+  if [ ! -d "$INSTALL_DIR/dist" ] || [ "$BUILT_COMMIT" != "$NEW_VERSION_FULL" ]; then
+    DIST_STALE=1
+  fi
+
+  if [ "$FORCE_REBUILD" = "1" ] || [ "$DIST_STALE" = "1" ]; then
+    # Self-heal (or forced): do NOT exit, do NOT set SKIP_BUILD -- let the
+    # build block below run and the script reach the end-of-run restart.
+    # The dep-install diff (OLD..NEW) is empty here, so npm ci stays skipped;
+    # only the rebuild + restart we actually need will run.
+    if [ "$FORCE_REBUILD" = "1" ]; then
+      echo -e "  ${ORANGE}↻${NC} Mar a legfrissebb verzion ($NEW_VERSION), de --rebuild -> ujraforditas + restart"
+    else
+      echo -e "  ${ORANGE}↻${NC} Mar a legfrissebb verzion ($NEW_VERSION), de a dist elavult (built=${BUILT_COMMIT:-none}) -> ongyogyito ujraforditas + restart"
+    fi
+  elif [ "$RESEED_FLEET" != "1" ] && [ "$REGEN_CLAUDEMD" != "1" ]; then
     if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
       echo -e "  ${GREEN}✓${NC} Already on the latest version ($NEW_VERSION)"
     else
       echo -e "  ${GREEN}✓${NC} Már a legfrissebb verzión vagy ($NEW_VERSION)"
     fi
     exit 0
-  fi
-  # --reseed-fleet / --regen-claudemd are explicit refresh requests, so they
-  # run even when the code is already current. Skip the dep-install + build
-  # below (nothing changed there) and jump to the seed/identity refresh.
-  if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
-    echo -e "  ${GREEN}✓${NC} Already on the latest version ($NEW_VERSION), continuing due to fleet-reseed/regen flag"
   else
-    echo -e "  ${GREEN}✓${NC} Már a legfrissebb verzión ($NEW_VERSION), folytatás a kért fleet-reseed/regen miatt"
+    # --reseed-fleet / --regen-claudemd are explicit refresh requests, so they
+    # run even when the code is already current. dist is verified fresh (marker
+    # == HEAD), so skip the dep-install + build below and jump to the
+    # seed/identity refresh.
+    if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
+      echo -e "  ${GREEN}✓${NC} Already on the latest version ($NEW_VERSION), continuing due to fleet-reseed/regen flag"
+    else
+      echo -e "  ${GREEN}✓${NC} Már a legfrissebb verzión ($NEW_VERSION), folytatás a kért fleet-reseed/regen miatt"
+    fi
+    SKIP_BUILD=1
   fi
-  SKIP_BUILD=1
 fi
 
 # Install deps if package.json OR package-lock.json changed. Use `npm ci`
@@ -280,6 +320,16 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
   # Rebuild
   echo -e "  Forditas..."
   npm run build --silent
+
+  # Stamp the build-marker AFTER a successful build (set -e means we only
+  # reach this line if the build succeeded). dist/.built-commit records the
+  # commit dist was built from, so the already-latest branch above can detect
+  # a stale dist on a later run and self-heal. `tsc` emits into dist/ without
+  # wiping it, so a marker written here survives subsequent incremental builds;
+  # dist/ is gitignored, so the marker is a pure runtime artifact.
+  if [ -d "$INSTALL_DIR/dist" ]; then
+    echo "$NEW_VERSION_FULL" > "$BUILT_COMMIT_FILE"
+  fi
 fi
 
 # Hook-ok szinkronizálása (~/.claude/hooks/ + ~/.claude/settings.json).
