@@ -12,6 +12,8 @@ import {
   detectsPastePlaceholder,
   detectPaneState,
   parkedInputText,
+  modalDismissTarget,
+  shouldDeferForHumanClient,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost } from './agent-config.js'
 import {
@@ -535,12 +537,39 @@ export function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}
 // every scheduled prompt + agent message until a human dismisses it. We strip
 // it pre-flight by sending "0" (Dismiss) when the marker is visible, so any
 // caller writing a prompt has a clear input field.
-const SURVEY_MODAL_RX = /How is Claude doing this session/
+const HUMAN_ACTIVITY_WINDOW_S = 120
 
+// True when a human client attached to this tmux session typed/scrolled within
+// the last HUMAN_ACTIVITY_WINDOW_S seconds. `#{client_activity}` only bumps on
+// client INPUT, not passive viewing, so an operator watching a pane does not
+// starve delivery -- only recent typing defers. Used to suppress ALL injection
+// (prompt, modal-dismiss, recovery Enter) so we never fight a human for the
+// input box. Fail-open: any tmux error returns false (a probe failure must not
+// block delivery).
+export function humanClientActive(session: string, host: string | null = null): boolean {
+  try {
+    // `=` prefix forces exact session-name match (plain -t prefix-matches, so
+    // `agent-kel` would also hit `agent-kelvin`).
+    const out = captureTmux(host, ['list-clients', '-t', `=${session}`, '-F', '#{client_activity}'])
+    const epochs = out.split('\n').map(l => parseInt(l.trim(), 10)).filter(n => Number.isFinite(n))
+    return shouldDeferForHumanClient(epochs, Math.floor(Date.now() / 1000), HUMAN_ACTIVITY_WINDOW_S)
+  } catch {
+    return false
+  }
+}
+
+// Modal detection + dismiss-gating live in pane-state.ts (modalDismissTarget):
+// the marker text alone is not enough -- it must be paired with the pane state
+// a GENUINE modal produces, so marker text echoed in a working agent's output
+// never triggers a stray keystroke into a live session.
 function dismissSurveyModalIfPresent(session: string, host: string | null = null): void {
   try {
+    if (humanClientActive(session, host)) {
+      logger.info({ session }, 'Survey-modal dismiss deferred: human client active')
+      return
+    }
     const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
-    if (!SURVEY_MODAL_RX.test(pane)) return
+    if (modalDismissTarget(pane) !== 'survey') return
     runTmux(host, ['send-keys', '-t', session, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
     // the prompt input, not the now-stale modal handler.
@@ -557,12 +586,14 @@ function dismissSurveyModalIfPresent(session: string, host: string | null = null
 // permissions" string), so isSessionReadyForPrompt() refuses to deliver and
 // every scheduled task / inter-agent message piles up behind it. Pre-flight
 // pick option 1 (Resume from summary, recommended) and Enter to confirm.
-const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
-
 export function dismissResumeSummaryModalIfPresent(session: string, host: string | null = null): void {
   try {
+    if (humanClientActive(session, host)) {
+      logger.info({ session }, 'Resume-modal dismiss deferred: human client active')
+      return
+    }
     const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
-    if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
+    if (modalDismissTarget(pane) !== 'resume-summary') return
     runTmux(host, ['send-keys', '-t', session, '1'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
     runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
@@ -573,6 +604,32 @@ export function dismissResumeSummaryModalIfPresent(session: string, host: string
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/dismiss resume-from-summary modal')
   }
+}
+
+// Proactive unblock for the worker loops (message-router, schedule-runner,
+// synochat-worker). The dismiss helpers historically ran only on the outbound
+// path and on restart; a blocked session never becomes ready, so delivery
+// loops skipped it forever and the dismiss never fired (observed: 13h inbound
+// stall behind a resume-summary modal). Loops call this from their not-ready
+// branch; the next tick delivers once the modal is gone.
+//
+// Probe rate-limit: one capture-pane probe per session per interval, so N
+// stuck messages to the same session cost one probe, not N per tick.
+const MODAL_UNBLOCK_MIN_INTERVAL_MS = 30_000
+const modalUnblockLastProbe = new Map<string, number>()
+
+export function tryUnblockSessionModals(session: string, host: string | null = null): void {
+  const now = Date.now()
+  const last = modalUnblockLastProbe.get(session) ?? 0
+  if (now - last < MODAL_UNBLOCK_MIN_INTERVAL_MS) return
+  modalUnblockLastProbe.set(session, now)
+  const pane = capturePane(session, host)
+  if (pane == null) return
+  const modal = modalDismissTarget(pane)
+  if (modal == null) return
+  logger.info({ session, modal }, 'Blocking modal detected on not-ready session -- attempting proactive dismiss')
+  if (modal === 'survey') dismissSurveyModalIfPresent(session, host)
+  else dismissResumeSummaryModalIfPresent(session, host)
 }
 
 // Post-(re)start identity setup. Every freshly spawned Claude Code session is

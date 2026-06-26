@@ -1299,3 +1299,76 @@ export function decideStuckToolCallRecovery(
     next: { ...prev, lastSeconds: sig.seconds, stagnantPolls: nextStagnant, stagnantSince: nextStagnantSince, attempts: 1 },
   }
 }
+
+// ---------------------------------------------------------------------------
+// Blocking-modal detection + human-client deferral (pure layer).
+//
+// Two Claude Code modals can park a session so that no injected prompt ever
+// lands:
+//   - the optional session-rating survey ("How is Claude doing this
+//     session?"): the idle footer stays visible so detectPaneState() says
+//     'idle', but the modal swallows the next keystroke;
+//   - the post-compaction / large --continue "Resume from summary" picker:
+//     its footer replaces the idle footer, detectPaneState() returns
+//     'unknown', and isSessionReadyForPrompt() refuses delivery forever.
+//
+// Historically the dismiss logic ran only on the OUTBOUND path
+// (sendPromptToSession pre-flight) and on restart paths -- a session blocked
+// mid-life never received a dismiss, so pending inter-agent / channel
+// messages piled up indefinitely (observed: 13h delivery stall). The worker
+// loops now probe with detectBlockingModal() and dismiss proactively.
+// The regexes are the single source of truth; agent-process.ts imports this.
+
+export type BlockingModal = 'survey' | 'resume-summary'
+
+const SURVEY_MODAL_RX = /How is Claude doing this session/
+const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
+
+// Resume-summary wins when both match: it is the one that blocks readiness
+// outright, and if its picker is on screen a survey-dismiss '0' would land
+// in the wrong handler.
+export function detectBlockingModal(pane: string): BlockingModal | null {
+  if (!pane || !pane.trim()) return null
+  if (RESUME_SUMMARY_MODAL_RX.test(pane)) return 'resume-summary'
+  if (SURVEY_MODAL_RX.test(pane)) return 'survey'
+  return null
+}
+
+// Should an injection (prompt, modal-dismiss, identity command, recovery
+// Enter) be deferred because a human is interacting with the pane?
+//
+// Input is the list of `#{client_activity}` epochs from
+// `tmux list-clients -t <session>` -- one entry per attached client.
+// Activity only updates on client INPUT (keystrokes, scroll), not on
+// passive viewing, so an operator who leaves a pane attached to watch it
+// does NOT starve delivery; only recent typing defers. windowS=Infinity
+// degrades to strict attached-only semantics if ever needed.
+export function shouldDeferForHumanClient(
+  clientActivityEpochs: number[],
+  nowEpoch: number,
+  windowS: number,
+): boolean {
+  return clientActivityEpochs.some(
+    ts => Number.isFinite(ts) && nowEpoch - ts <= windowS,
+  )
+}
+
+// Decide whether a proactive dismiss may fire for the pane. The marker text
+// alone is NOT enough: a working agent can have the literal phrase in its
+// visible output (these very agents discuss this feature), and capture-pane
+// shows whatever is on screen -- detectBlockingModal would then report a
+// modal on a busy/idle pane and the dismiss would inject keystrokes into a
+// live session, the same interference class the human-guard exists to
+// prevent, just against an agent. A GENUINE modal has a characteristic pane
+// state: the resume picker replaces the idle footer ('unknown'), the survey
+// keeps it ('idle'). Any other pairing means the marker is output, not a
+// live modal. Tradeoff: a lingering busy-indicator above a real modal
+// defers the dismiss to a later probe instead of risking keys into a turn.
+export function modalDismissTarget(pane: string): BlockingModal | null {
+  const modal = detectBlockingModal(pane)
+  if (modal == null) return null
+  const state = detectPaneState(pane)
+  if (modal === 'resume-summary' && state === 'unknown') return modal
+  if (modal === 'survey' && state === 'idle') return modal
+  return null
+}
