@@ -24,7 +24,10 @@ import {
   clearStaleParkedInput,
   sendPromptToSession,
   sessionExistsOnHost,
+  humanClientActive,
+  tryUnblockSessionModals,
 } from './agent-process.js'
+import { maybeSendDeferAlert, clearDeferAlert, classifyDeferCause, DEFER_ALERT_AFTER_MS } from './defer-alert.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
 // Channel-coordinator sources whose messages are real inbound user messages
@@ -109,6 +112,24 @@ export function startMessageRouter(): NodeJS.Timeout {
         continue
       }
 
+      // Interference guard: a human is typing in the target pane -- injecting
+      // now would interleave our keystrokes with theirs. Leave the row pending
+      // (shouldAbandon never drops a message whose session exists).
+      if (humanClientActive(session, host)) {
+        maybeSendDeferAlert({
+          key: `agent-msg-${msg.id}`,
+          ageMs,
+          cause: 'human',
+          session,
+          what: `@${msg.from_agent} -> @${msg.to_agent} agens-uzenet (#${msg.id})`,
+        })
+        if (!routerLoggedMisses.has(msg.id)) {
+          logger.info({ id: msg.id, to: msg.to_agent, session }, 'Agent message deferred: human client active in target pane')
+          routerLoggedMisses.add(msg.id)
+        }
+        continue
+      }
+
       if (!isSessionReadyForPrompt(session, host)) {
         // Stale-parked-input janitor: a non-submitted line stuck in the input
         // box (e.g. a weak local model that typed its heartbeat reply into the
@@ -122,6 +143,25 @@ export function startMessageRouter(): NodeJS.Timeout {
         if (ageMs > JANITOR_PARKED_MIN_AGE_MS && clearStaleParkedInput(session, host)) {
           routerLoggedMisses.delete(msg.id)
           continue // input cleared; deliver on the next tick
+        }
+        // A blocking modal (resume-summary / survey) never clears on its own
+        // and this loop is the only consumer that notices -- dismiss it
+        // proactively so the next tick can deliver. Rate-limited internally.
+        tryUnblockSessionModals(session, host)
+        // Past the alert threshold, classify WHY the session is not ready and
+        // notify the operator once (busy = normal long turn, never alerts;
+        // null = transient capture failure, re-classify next tick).
+        if (ageMs > DEFER_ALERT_AFTER_MS) {
+          const cause = classifyDeferCause(session)
+          if (cause != null) {
+            maybeSendDeferAlert({
+              key: `agent-msg-${msg.id}`,
+              ageMs,
+              cause,
+              session,
+              what: `@${msg.from_agent} -> @${msg.to_agent} agens-uzenet (#${msg.id})`,
+            })
+          }
         }
         if (!routerLoggedMisses.has(msg.id)) {
           logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session busy, will retry')
@@ -182,6 +222,7 @@ export function startMessageRouter(): NodeJS.Timeout {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }
         routerLoggedMisses.delete(msg.id)
+        clearDeferAlert(`agent-msg-${msg.id}`)
         logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category: isChannelInbound ? 'channel-inbound' : trusted ? 'trusted-peer' : 'untrusted' }, 'Agent message delivered')
       } catch (err) {
         logger.warn({ err, id: msg.id }, 'Failed to deliver agent message')

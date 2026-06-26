@@ -305,10 +305,19 @@ date +%s > "$INSTALL_DIR/store/.channel-last-respawn"
 (
   sleep 15
   CLAUDE_PID="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
-  # Check 1: bun grandchild of the marveen-channels claude
+  # Check 1: provider-specific poller child of the marveen-channels claude.
+  # The regex matches THIS provider's poller cmd, not a bare bun -- a second
+  # channel plugin's bun would otherwise count as "healthy" for the failed
+  # one. Keeps in sync with channel-poller-liveness.ts matchesProviderPollerCmd.
   BUN_CHILD=""
   if [ -n "$CLAUDE_PID" ]; then
-    BUN_CHILD="$(/usr/bin/pgrep -P "$CLAUDE_PID" bun 2>/dev/null | head -1)"
+    case "$CHANNEL_PROVIDER" in
+      telegram) POLLER_REGEX='(/telegram/.*bun|bun.*server\.ts)' ;;
+      discord)  POLLER_REGEX='discord.*(node|bun)' ;;
+      slack)    POLLER_REGEX='slack.*(node|bun)' ;;
+      *)        POLLER_REGEX='bun' ;;
+    esac
+    BUN_CHILD="$(/usr/bin/pgrep -P "$CLAUDE_PID" -f "$POLLER_REGEX" 2>/dev/null | head -1)"
   fi
   if [ -n "$BUN_CHILD" ]; then
     # Plugin is alive via the authoritative process-tree check. Don't probe the

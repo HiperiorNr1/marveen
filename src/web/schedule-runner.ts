@@ -36,7 +36,10 @@ import {
   sessionExistsOnHost,
   capturePane,
   sendEnterToSession,
+  humanClientActive,
+  tryUnblockSessionModals,
 } from './agent-process.js'
+import { detectPaneState } from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
 import { runCommandTask } from './command-task.js'
@@ -122,17 +125,40 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
     return 'starting'
   }
 
+  // Interference guard: a human is typing in the target pane. Applies even
+  // with forceSend -- forceSend bypasses the busy-STATE check (Claude queues
+  // the prompt internally), but nothing may type into an operator's in-progress
+  // input. The pending-retry table re-fires on the next tick. (No defer-alert
+  // here: the retry table already surfaces a stuck scheduled task.)
+  if (humanClientActive(session, host)) {
+    logger.info({ task: task.name, agent: agentName, session }, 'Schedule target pane has an active human client, deferring')
+    return 'busy'
+  }
+
   // When forceSend is true, skip the busy-state check entirely and inject
   // the prompt regardless. The Claude session queues it internally and
   // will process it at the next idle slot. This prevents the infinite
   // retry loop observed when the target session stays busy for hours
   // (275 retries overnight in production).
   if (!task.forceSend && !isSessionReadyForPrompt(session, host)) {
+    // Proactively dismiss a blocking modal (resume-summary / survey) so the
+    // retry converges instead of waiting on a modal that never clears by
+    // itself. Rate-limited internally.
+    tryUnblockSessionModals(session, host)
     logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session busy or has pending input, will retry')
     return 'busy'
   }
 
   if (task.forceSend) {
+    // forceSend bypasses the busy-STATE check, but never an unsubmitted human
+    // draft -- injecting would concatenate the prompt into the draft and the
+    // trailing Enter submits both (the 2026-06-11 draft-merge incident class).
+    // Same precedence as the human-guard: nothing writes over human input.
+    const pane = capturePane(session, host)
+    if (pane != null && detectPaneState(pane) === 'typing') {
+      logger.warn({ task: task.name, agent: agentName, session }, 'forceSend deferred: unsubmitted draft in target input box, will retry')
+      return 'busy'
+    }
     logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check')
   }
 

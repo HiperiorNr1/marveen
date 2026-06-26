@@ -17,6 +17,7 @@ import {
   startAgentProcess,
   stopAgentProcess,
   scheduleIdentitySetup,
+  humanClientActive,
 } from './agent-process.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
@@ -196,6 +197,15 @@ export function recoverStuckInputForSession(
   const pane = capturePane(session)
   const sig = pane != null ? stuckInputSignature(pane) : null
   const decision = decideStuckInputRecovery(sig, prev, Date.now(), thresholds)
+  // Interference guard: the recovery Enter / re-inject keystrokes would
+  // interleave with live human typing. Defer by returning prev unchanged (no
+  // attempt consumed); the state machine re-fires on the next monitor tick.
+  // The parked-block gate already proves this is a channel notification, never
+  // a human draft, so deferral only waits out active typing.
+  if (decision.recover && pane != null && humanClientActive(session)) {
+    logger.info({ session }, 'Stuck-input recovery deferred: human client active')
+    return prev
+  }
   if (decision.recover && pane != null) {
     const attempt = decision.next.attempts
     const block = parkedChannelInput(pane)

@@ -36,6 +36,7 @@ import { execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import type { ChannelProviderType } from '../channel-provider.js'
+import { hasProviderPoller } from './channel-poller-liveness.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -78,24 +79,6 @@ function getSessionClaudePid(session: string): number | null {
   } catch (err) {
     logger.warn({ err, session }, 'channel-plugin-unlock: failed to read session claude pid')
     return null
-  }
-}
-
-// True iff at least one `bun` child is reparented under the claude pid -
-// the plugin spawns its poller as a direct subprocess of the claude main
-// loop, so bun's presence under the claude pid is the most reliable
-// liveness signal we have. Matches the channels.sh `pgrep -P <claude_pid>
-// bun` check so the two paths agree on what "plugin running" means.
-function hasBunChild(claudePid: number): boolean {
-  try {
-    const out = execFileSync('/usr/bin/pgrep', ['-P', String(claudePid), 'bun'], {
-      timeout: 3000,
-      encoding: 'utf-8',
-    }).trim()
-    return out.length > 0
-  } catch {
-    // pgrep exits 1 when there are no matches; treat as "no bun child"
-    return false
   }
 }
 
@@ -175,10 +158,14 @@ function runUnlockProbe(state: UnlockProbeState): void {
     return
   }
 
-  if (hasBunChild(claudePid)) {
+  // Provider-scoped liveness: a bare `bun` child is NOT enough -- with two
+  // channel plugins enabled, a second plugin's bun child masks THIS provider's
+  // dead poller and the unlock never fires (telegram-reconnect-loop-fix-
+  // 2026-06-02). hasProviderPoller DFS-matches only this provider's poller.
+  if (hasProviderPoller(claudePid, state.provider)) {
     logger.info(
       { session: state.session, claudePid, provider: state.provider },
-      'channel-plugin-unlock: bun child present, plugin healthy - no unlock needed',
+      'channel-plugin-unlock: provider poller present, plugin healthy - no unlock needed',
     )
     return
   }
@@ -198,7 +185,7 @@ function runUnlockProbe(state: UnlockProbeState): void {
 
   logger.warn(
     { session: state.session, claudePid, provider: state.provider },
-    'channel-plugin-unlock: bun child absent after cold-start window, firing /mcp unlock sequence',
+    'channel-plugin-unlock: provider poller absent after cold-start window, firing /mcp unlock sequence',
   )
   sendUnlockKeystrokes(state.session)
 }
