@@ -111,6 +111,18 @@ const BUSY_INDICATORS: RegExp[] = [
 const BUSY_ESC_TO_INTERRUPT_RX = /\besc to interrupt\b/
 const LIVE_FOOTER_REGION_LINES = 5
 
+// Index of the LAST (bottom-most) idle-footer line, or -1. Anchoring from the
+// bottom keeps the input-box scan on the LIVE footer: a footer string quoted in
+// scrollback (a watchdog report, a pasted log) sits ABOVE it, and a top-anchored
+// findIndex would latch onto that historical line and shift the box scan onto a
+// stale box, hiding a real parked draft (2026-06-11 draft-merge incident).
+function lastFooterIndex(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (IDLE_FOOTER_RX.test(lines[i])) return i
+  }
+  return -1
+}
+
 // Pasted-text placeholder. Claude Code lifts a single large input write
 // (empirically a tmux send-keys -l of more than ~700 chars) into a
 // `[Pasted text #N]` / `[Pasted text #N +X chars]` stub that sits in the
@@ -384,7 +396,16 @@ export function detectPaneState(
   // defer rather than pile a second prompt on.
   if (detectsPastePlaceholder(pane)) return 'busy'
 
-  if (!IDLE_FOOTER_RX.test(pane)) return 'unknown'
+  // Anchor the live footer from the BOTTOM and require it to sit within the
+  // bottom LIVE_FOOTER_REGION_LINES. A footer string quoted in scrollback (a
+  // watchdog report, a pasted log) must not be taken for the live footer --
+  // that would shift the input-box scan onto a historical box and hide a real
+  // parked draft (2026-06-11 draft-merge incident). Replaces the whole-pane
+  // IDLE_FOOTER_RX.test(pane) gate, which passed on a quoted footer alone.
+  const footerBottomIdx = lastFooterIndex(paneLines)
+  if (footerBottomIdx < 0 || paneLines.length - footerBottomIdx > LIVE_FOOTER_REGION_LINES) {
+    return 'unknown'
+  }
 
   if (detectsThinkingBlockError(pane)) return 'error'
 
@@ -392,7 +413,7 @@ export function detectPaneState(
   // Scan UPWARDS from the footer so we stay inside the live box and
   // don't pick up historical ❯ lines from scrollback.
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = lastFooterIndex(lines)
   if (footerIdx >= 0) {
     let bottomSep = -1
     for (let i = footerIdx - 1; i >= 0; i--) {
@@ -449,8 +470,11 @@ export function isReadyForPrompt(pane: string): boolean {
 // "not enough signal to act, do nothing".
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-  if (footerIdx < 0) return null
+  // Bottom-anchored, region-bounded footer (mirrors detectPaneState): a
+  // scrollback-quoted footer must not shift the box scan off the live input
+  // box. See lastFooterIndex.
+  const footerIdx = lastFooterIndex(lines)
+  if (footerIdx < 0 || lines.length - footerIdx > LIVE_FOOTER_REGION_LINES) return null
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
     if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
