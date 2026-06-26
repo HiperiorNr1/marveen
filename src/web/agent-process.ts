@@ -12,6 +12,7 @@ import {
   detectsPastePlaceholder,
   detectPaneState,
   parkedInputText,
+  stripGhostSuggestion,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost } from './agent-config.js'
 import {
@@ -911,6 +912,23 @@ export function sendEnterToSession(session: string, host: string | null = null):
 export function capturePane(session: string, host: string | null = null): string | null {
   try {
     return captureTmux(host, ['capture-pane', '-t', session, '-p'])
+  } catch {
+    return null
+  }
+}
+
+// Capture a pane for STUCK-INPUT detection, with the editor's dim "ghost
+// suggestion" autocomplete removed. Captures WITH colour (`-e`) and strips the
+// SGR-2 (dim) ghost + all ANSI, so a hint shown in an empty input box is never
+// mistaken for a genuinely parked input. Every auto-submitting recovery path
+// (channel-monitor recoverStuckInputForSession, stuck-input-watcher
+// bareEnterRecovery) MUST read the pane through THIS, not plain capturePane --
+// otherwise the dim ghost reads as real text and gets re-typed + Enter-
+// submitted (phantom prompt-injection, 2026-06-26). Returns null on capture
+// failure (treated as "nothing parked"), matching capturePane's contract.
+export function captureParkedInputView(session: string, host: string | null = null): string | null {
+  try {
+    return stripGhostSuggestion(captureTmux(host, ['capture-pane', '-t', session, '-e', '-p']))
   } catch {
     return null
   }

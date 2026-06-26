@@ -201,6 +201,61 @@ const BOX_SEP_RX = /^─{10,}/
 // admitting the NBSP and any other horizontal Unicode space the TUI emits.
 const PARKED_INPUT_RX = /❯[^\S\r\n]+\S/
 
+// Strip Claude Code's DIM (SGR 2) "ghost suggestion" autocomplete from a
+// COLOURED pane capture (`tmux capture-pane -e -p`), then remove every
+// remaining ANSI escape, yielding plain text equivalent to `capture-pane -p`
+// MINUS the ghost. Claude Code renders a history/autocomplete hint inside an
+// EMPTY input box at REDUCED intensity (`❯ ` then `ESC[2m<hint>ESC[0m`). A
+// plain (`-p`) capture drops the colour, so the dim hint becomes
+// indistinguishable from a genuinely parked input -- and the stuck-input
+// recovery then re-types + Enter-submits it as if the agent had typed it
+// (the 2026-06-26 phantom prompt-injection: it triggered a real invoice storno
+// and a forged email). The discriminator is intensity: a real parked input is
+// rendered at NORMAL intensity, only the ghost is dim. We track SGR dim state
+// across the stream and DROP any character emitted while dim is active, so a
+// pure-ghost box collapses to `❯ ` (no `\S` after the prompt) and
+// PARKED_INPUT_RX / detectPaneState no longer read it as 'typing'.
+//
+// Pure: a string transform, unit-testable against captured `-e` fixtures.
+// `38`/`48` extended-colour params (`38;5;N`, `38;2;R;G;B`) are consumed as a
+// unit so a colour INDEX of 2 is never mistaken for the dim attribute.
+export function stripGhostSuggestion(coloredPane: string): string {
+  let out = ''
+  let dim = false
+  let i = 0
+  const n = coloredPane.length
+  while (i < n) {
+    const ch = coloredPane[i]
+    if (ch === '\x1b') {
+      if (coloredPane[i + 1] !== '[') { i++; continue } // drop non-CSI ESC
+      let j = i + 2
+      while (j < n && (coloredPane[j] < '@' || coloredPane[j] > '~')) j++
+      const final = coloredPane[j]
+      if (final === 'm') {
+        const params = coloredPane.slice(i + 2, j)
+        const codes = params.length === 0 ? [''] : params.split(';')
+        let k = 0
+        while (k < codes.length) {
+          const c = codes[k]
+          if (c === '38' || c === '48') {
+            const mode = codes[k + 1]
+            k += mode === '5' ? 3 : mode === '2' ? 5 : 1
+            continue
+          }
+          if (c === '2') dim = true
+          else if (c === '0' || c === '22' || c === '') dim = false
+          k++
+        }
+      }
+      i = j < n ? j + 1 : n // skip the whole escape sequence
+      continue
+    }
+    if (!dim) out += ch
+    i++
+  }
+  return out
+}
+
 // Persistent Anthropic thinking-block API error. When an assistant turn
 // ends with a 400 about thinking/redacted_thinking blocks that "cannot
 // be modified", the session is wedged: every subsequent prompt re-sends

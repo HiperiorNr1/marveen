@@ -1,7 +1,7 @@
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { listAgentNames, readAgentRemoteHost } from './agent-config.js'
-import { isAgentRunning, capturePane, sendEnterToSession } from './agent-process.js'
+import { isAgentRunning, captureParkedInputView, sendEnterToSession } from './agent-process.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { recoverStuckInputForSession, sendAlert } from './channel-monitor.js'
@@ -80,7 +80,10 @@ const watchState = new Map<string, StuckInputState>()
 // for REMOTE sub-agents, where the local-tmux clear+re-inject is not
 // available. channel-monitor owns the clear+re-inject escalation for these.
 function bareEnterRecovery(label: string, session: string, host: string | null): void {
-  const pane = capturePane(session, host)
+  // Ghost-stripped capture: a bare recovery Enter submits whatever is parked,
+  // so a dim autocomplete hint read as parked input would be Enter-submitted as
+  // a forged message. captureParkedInputView removes the SGR-2 ghost first.
+  const pane = captureParkedInputView(session, host)
   // A failed capture is treated as "nothing parked" -- it ends any active
   // spell rather than holding stale state across a transient tmux miss.
   const sig = pane == null ? null : stuckInputSignature(pane)

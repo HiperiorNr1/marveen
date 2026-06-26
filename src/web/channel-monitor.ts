@@ -10,6 +10,7 @@ import {
   agentHasChannel,
   agentSessionName,
   capturePane,
+  captureParkedInputView,
   clearInputBuffer,
   dismissResumeSummaryModalIfPresent,
   isAgentRunning,
@@ -193,7 +194,10 @@ export function recoverStuckInputForSession(
   thresholds: StuckInputThresholds,
   allowPlainReinject: boolean,
 ): StuckInputState {
-  const pane = capturePane(session)
+  // Ghost-stripped capture: a dim autocomplete hint in an empty box must NOT
+  // read as parked input, or the recovery below would re-type + submit it
+  // (phantom prompt-injection). See captureParkedInputView / stripGhostSuggestion.
+  const pane = captureParkedInputView(session)
   const sig = pane != null ? stuckInputSignature(pane) : null
   const decision = decideStuckInputRecovery(sig, prev, Date.now(), thresholds)
   if (decision.recover && pane != null) {
@@ -274,7 +278,7 @@ function performStuckInputAction(
     // submitLanded() handles a null capture internally (-> not landed). prevSig
     // is non-null here in practice (recover only fires on a parked signature),
     // but guard the type narrowing explicitly.
-    const landed = prevSig != null ? submitLanded(prevSig, capturePane(session)) : false
+    const landed = prevSig != null ? submitLanded(prevSig, captureParkedInputView(session)) : false
     logger.warn(
       { session, action, attempt, landed },
       landed
