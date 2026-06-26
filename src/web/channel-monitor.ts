@@ -1101,18 +1101,8 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     for (const t of targets) {
       const pane = capturePane(t.session)
       const inMenu = pane != null && detectsBlockingMenu(pane)
-      // Interference guard: a human navigating the /mcp menu (or a model /
-      // permission picker) trips detectsBlockingMenu exactly like a wedged
-      // session does. Treat human-active as "not a recoverable menu" so the
-      // recovery Escape is NEVER injected into a human's live picker (it would
-      // cancel their selection). Feeding the gate (not just the send) means prev
-      // state is left intact and the confirm window restarts once they are done
-      // -- the same defer-and-re-fire semantics as the dismiss / stuck-input /
-      // delivery paths. The `&&` short-circuits so the tmux list-clients probe
-      // only runs when a blocking menu is actually present.
-      const recoverableMenu = inMenu && !humanClientActive(t.session)
       const prev = paneMenuState.get(t.session) ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
-      const decision = decidePaneErrorAlert(recoverableMenu, prev, Date.now(), {
+      const decision = decidePaneErrorAlert(inMenu, prev, Date.now(), {
         confirmMs: MENU_RECOVER_CONFIRM_MS,
         dedupMs: MENU_RECOVER_DEDUP_MS,
         clearMs: MENU_RECOVER_CLEAR_MS,
@@ -1124,13 +1114,24 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       }
       if (decision.alert) {
         const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
-        logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
-        try {
-          execFileSync(TMUX, ['send-keys', '-t', t.session, 'Escape'], { timeout: 5000 })
-        } catch (err) {
-          logger.warn({ err, session: t.session }, 'Menu-recovery Escape failed')
+        // Interference guard: detectsBlockingMenu (#363) sees a /mcp picker the
+        // same whether a HUMAN is navigating it or a session wedged in it. The
+        // recovery Escape would CANCEL a human's live selection, so defer the
+        // keystroke while a human client is active -- log only, no Escape, no
+        // operator alert (it is not a stuck session, the human is using it).
+        // The state machine still ticks; the next sweep recovers once the human
+        // is done. Consistent with the dismiss / stuck-input / delivery paths.
+        if (humanClientActive(t.session)) {
+          logger.info({ session: t.session, agent: label }, 'Menu-recovery Escape deferred: human client active')
+        } else {
+          logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
+          try {
+            execFileSync(TMUX, ['send-keys', '-t', t.session, 'Escape'], { timeout: 5000 })
+          } catch (err) {
+            logger.warn({ err, session: t.session }, 'Menu-recovery Escape failed')
+          }
+          sendAlert(`⌨️ A(z) ${label} session beragadt egy interaktiv menube (pl. /mcp) es nem dolgozott fel uzeneteket. Kikuldtem egy Escape-et, visszateritettem a prompthoz. Ha ismetlodik: tmux attach -t ${t.session}`)
         }
-        sendAlert(`⌨️ A(z) ${label} session beragadt egy interaktiv menube (pl. /mcp) es nem dolgozott fel uzeneteket. Kikuldtem egy Escape-et, visszateritettem a prompthoz. Ha ismetlodik: tmux attach -t ${t.session}`)
       }
     }
 

@@ -51,11 +51,19 @@ describe('shouldDeferForHumanClient', () => {
 // refactor cannot silently re-open it.
 describe('blocking-menu Escape recovery is human-gated (channel-monitor)', () => {
   const src = readFileSync(join(__dirname, '../web/channel-monitor.ts'), 'utf-8')
-  it('feeds humanClientActive into the menu-recovery gate (Escape never fires while a human navigates)', () => {
-    expect(src).toMatch(/detectsBlockingMenu\(pane\)/)
-    expect(src).toMatch(/inMenu && !humanClientActive\(/)
+  // The recovery block sends `Escape` to pop a parked /mcp menu. It MUST defer
+  // that keystroke when a human client is active, or it cancels a human's live
+  // selection. Lock the send-site guard so a refactor cannot silently drop it.
+  it('defers the recovery Escape when a human client is active', () => {
+    expect(src).toMatch(/Menu-recovery Escape deferred: human client active/)
+    expect(src).toMatch(/if \(humanClientActive\(t\.session\)\)/)
   })
-  it('does not pass the bare inMenu flag to the menu-recovery alert gate (the pre-fix hazard shape)', () => {
-    expect(src).not.toMatch(/decidePaneErrorAlert\(inMenu,/)
+  it('the recovery Escape send-keys is reachable only past the humanClientActive branch', () => {
+    // The deferred-log (human-active branch) must appear BEFORE the Escape send,
+    // proving the keystroke sits in the non-human else path.
+    const deferIdx = src.indexOf('Menu-recovery Escape deferred')
+    const escIdx = src.indexOf("'send-keys', '-t', t.session, 'Escape'")
+    expect(deferIdx).toBeGreaterThan(-1)
+    expect(escIdx).toBeGreaterThan(deferIdx)
   })
 })
