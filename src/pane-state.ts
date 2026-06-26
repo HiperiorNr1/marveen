@@ -1146,6 +1146,14 @@ export interface StuckToolCallState {
    * so the residual band does not look like a wedge (2026-06-08 false-positive
    * loop: 13 self-respawns in 8h triggered by 3-4s residuals every poll). */
   spellPeakSeconds: number | null
+  /**
+   * True once the tool-call counter has advanced AT LEAST ONCE during this
+   * spell (life observed in OUR window). Closes the high-counter-residual
+   * B-gap: a job that finished at e.g. 91s leaves a stale footer whose first
+   * observation already reads 91 (passes the peak gate) but never climbs, so
+   * it is indistinguishable from a real wedge on the counter alone.
+   * Requiring spellCounterAdvanced=true means the spell must have shown life. */
+  spellCounterAdvanced: boolean
   /** When the spell was first observed (ms). */
   firstSeenAt: number | null
   /** Last observed seconds value, used to detect stagnation across polls. */
@@ -1199,6 +1207,7 @@ const NO_STUCK_TOOL_CALL: StuckToolCallState = {
   tag: null,
   spellStartSeconds: null,
   spellPeakSeconds: null,
+  spellCounterAdvanced: false,
   firstSeenAt: null,
   lastSeconds: null,
   stagnantPolls: 0,
@@ -1235,6 +1244,7 @@ export function decideStuckToolCallRecovery(
   prev: StuckToolCallState,
   now: number,
   thresholds: StuckToolCallThresholds,
+  lastResponsiveAt: number | null = null,
 ): StuckToolCallDecision {
   // No tool-call line: end any spell.
   if (sig === null) {
@@ -1248,6 +1258,7 @@ export function decideStuckToolCallRecovery(
         tag: sig.tag,
         spellStartSeconds: sig.seconds,
         spellPeakSeconds: sig.seconds,
+        spellCounterAdvanced: false,
         firstSeenAt: now,
         lastSeconds: sig.seconds,
         stagnantPolls: 0,
@@ -1264,6 +1275,7 @@ export function decideStuckToolCallRecovery(
         tag: sig.tag,
         spellStartSeconds: sig.seconds,
         spellPeakSeconds: sig.seconds,
+        spellCounterAdvanced: false,
         firstSeenAt: now,
         lastSeconds: sig.seconds,
         stagnantPolls: 0,
@@ -1283,7 +1295,14 @@ export function decideStuckToolCallRecovery(
     const peak = Math.max(prev.spellPeakSeconds ?? sig.seconds, sig.seconds)
     return {
       recover: false,
-      next: { ...prev, spellPeakSeconds: peak, lastSeconds: sig.seconds, stagnantPolls: 0, stagnantSince: null },
+      next: {
+        ...prev,
+        spellPeakSeconds: peak,
+        spellCounterAdvanced: true,
+        lastSeconds: sig.seconds,
+        stagnantPolls: 0,
+        stagnantSince: null,
+      },
     }
   }
   // Counter stagnant (same or rolled-back). Tick the stagnant counter and
@@ -1308,10 +1327,19 @@ export function decideStuckToolCallRecovery(
   const stagnantMs = now - nextStagnantSince
   const freezeMs = thresholds.freezeSeconds * 1000
   const peak = prev.spellPeakSeconds ?? sig.seconds
+  // Dual-signal liveness gate (b): the session proved responsive AFTER the
+  // freeze started (an inbound message ingested or a keepalive landed since
+  // stagnantSince) -- a wedged TUI cannot do that, so treat it as alive.
+  const sessionResponsive =
+    lastResponsiveAt != null && lastResponsiveAt >= nextStagnantSince
   if (
     stagnantMs < freezeMs ||
     nextStagnant < thresholds.stagnantPolls ||
-    peak < thresholds.minPeakSeconds
+    peak < thresholds.minPeakSeconds ||
+    // Dual-signal gate (a): the counter never advanced in our window, so this
+    // is a high-counter residual (job finished, stale footer), not a wedge.
+    !prev.spellCounterAdvanced ||
+    sessionResponsive
   ) {
     return {
       recover: false,
