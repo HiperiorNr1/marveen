@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { shouldDeferForHumanClient } from '../pane-state.js'
 
 // Locks the interference-guard semantics: injection defers ONLY when an
@@ -38,5 +40,22 @@ describe('shouldDeferForHumanClient', () => {
   it('window=Infinity degrades to attached-only semantics', () => {
     expect(shouldDeferForHumanClient([NOW - 999_999], NOW, Infinity)).toBe(true)
     expect(shouldDeferForHumanClient([], NOW, Infinity)).toBe(false)
+  })
+})
+
+// The blocking-menu Escape recovery (channel-monitor) adopts upstream's generic
+// detectsBlockingMenu detector (#363), which sees a /mcp picker the same whether
+// a human or a wedge parked it. The recovery Escape MUST be human-gated -- an
+// un-gated Escape cancels a human's live menu selection (the 2026-06-15 hazard:
+// "upstream's Escape pass has NO human-guard"). Lock the guard in source so a
+// refactor cannot silently re-open it.
+describe('blocking-menu Escape recovery is human-gated (channel-monitor)', () => {
+  const src = readFileSync(join(__dirname, '../web/channel-monitor.ts'), 'utf-8')
+  it('feeds humanClientActive into the menu-recovery gate (Escape never fires while a human navigates)', () => {
+    expect(src).toMatch(/detectsBlockingMenu\(pane\)/)
+    expect(src).toMatch(/inMenu && !humanClientActive\(/)
+  })
+  it('does not pass the bare inMenu flag to the menu-recovery alert gate (the pre-fix hazard shape)', () => {
+    expect(src).not.toMatch(/decidePaneErrorAlert\(inMenu,/)
   })
 })

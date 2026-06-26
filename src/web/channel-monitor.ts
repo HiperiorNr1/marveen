@@ -1101,8 +1101,18 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     for (const t of targets) {
       const pane = capturePane(t.session)
       const inMenu = pane != null && detectsBlockingMenu(pane)
+      // Interference guard: a human navigating the /mcp menu (or a model /
+      // permission picker) trips detectsBlockingMenu exactly like a wedged
+      // session does. Treat human-active as "not a recoverable menu" so the
+      // recovery Escape is NEVER injected into a human's live picker (it would
+      // cancel their selection). Feeding the gate (not just the send) means prev
+      // state is left intact and the confirm window restarts once they are done
+      // -- the same defer-and-re-fire semantics as the dismiss / stuck-input /
+      // delivery paths. The `&&` short-circuits so the tmux list-clients probe
+      // only runs when a blocking menu is actually present.
+      const recoverableMenu = inMenu && !humanClientActive(t.session)
       const prev = paneMenuState.get(t.session) ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
-      const decision = decidePaneErrorAlert(inMenu, prev, Date.now(), {
+      const decision = decidePaneErrorAlert(recoverableMenu, prev, Date.now(), {
         confirmMs: MENU_RECOVER_CONFIRM_MS,
         dedupMs: MENU_RECOVER_DEDUP_MS,
         clearMs: MENU_RECOVER_CLEAR_MS,
