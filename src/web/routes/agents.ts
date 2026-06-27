@@ -31,6 +31,9 @@ import {
   readAgentRemoteConfig,
   readAgentRemoteHost,
   writeAgentRemoteConfig,
+  readAgentVoiceConfig,
+  writeAgentVoiceConfig,
+  KNOWN_VOICE_MODELS,
   type AuthMode,
 } from '../agent-config.js'
 import {
@@ -1514,6 +1517,36 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     rmSync(dir, { recursive: true, force: true })
     cleanupTeamReferences(name)
     json(res, { ok: true })
+    return true
+  }
+
+  // GET /api/agents/:name/voice-config
+  const voiceConfigMatch = path.match(/^\/api\/agents\/([^/]+)\/voice-config$/)
+  if (voiceConfigMatch && method === 'GET') {
+    const name = decodeURIComponent(voiceConfigMatch[1])
+    if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    json(res, { ...readAgentVoiceConfig(name), availableVoices: Array.from(KNOWN_VOICE_MODELS) })
+    return true
+  }
+
+  // PUT /api/agents/:name/voice-config
+  // Body: { responseMode?: 'text'|'voice'|'auto', voiceModel?: string }
+  if (voiceConfigMatch && method === 'PUT') {
+    const name = decodeURIComponent(voiceConfigMatch[1])
+    if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    const body = await readBody(req)
+    let data: { responseMode?: string; voiceModel?: string }
+    try { data = JSON.parse(body.toString()) } catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    try {
+      writeAgentVoiceConfig(name, {
+        responseMode: data.responseMode as 'text' | 'voice' | 'auto' | undefined,
+        voiceModel: data.voiceModel,
+      })
+    } catch (err: unknown) {
+      json(res, { error: err instanceof Error ? err.message : 'invalid config' }, 400)
+      return true
+    }
+    json(res, { ok: true, ...readAgentVoiceConfig(name) })
     return true
   }
 
